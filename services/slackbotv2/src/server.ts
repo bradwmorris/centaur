@@ -79,6 +79,7 @@ const options: SlackbotV2Options = {
       }
     : {},
   idleTimeoutMs: optionalNumberEnv('SESSION_IDLE_TIMEOUT_MS'),
+  interactionSink: interactionSinkEnv(),
   maxDurationMs: optionalNumberEnv('SESSION_MAX_DURATION_MS'),
   messageOverridesStrategy: createMessageOverridesStrategy(),
   postgresUrl:
@@ -198,6 +199,22 @@ function optionalNumberEnv(name: string): number | undefined {
     throw new Error(`${name} must be a positive integer`)
   }
   return parsed
+}
+
+function interactionSinkEnv(): SlackbotV2Options['interactionSink'] {
+  const url = optionalEnv('SLACKBOTV2_INTERACTION_SINK_URL')
+  const token = optionalEnv('SLACKBOTV2_INTERACTION_SINK_TOKEN')
+  if (!url && !token) return undefined
+  if (!url || !token) {
+    throw new Error(
+      'SLACKBOTV2_INTERACTION_SINK_URL and SLACKBOTV2_INTERACTION_SINK_TOKEN must be set together'
+    )
+  }
+  return {
+    url,
+    token,
+    timeoutMs: optionalNumberEnv('SLACKBOTV2_INTERACTION_SINK_TIMEOUT_MS')
+  }
 }
 
 function log(level: (typeof LOG_LEVELS)[number], message: string, data?: unknown): void {

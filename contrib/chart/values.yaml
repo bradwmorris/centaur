@@ -583,6 +583,14 @@ slackbotv2:
   mcpPublicUrl: "http://localhost:3000"
   externalOrgAllowlist: ""
   triggerBotAllowlist: ""
+  # Optional normalized post-response Slack transcript sink. The receiver owns
+  # its own approved-surface policy and idempotency. Reference a dedicated
+  # Secret; never put the sink credential in values or the shared Secret.
+  interactionSink:
+    url: ""
+    timeoutMs: 5000
+    secretName: ""
+    secretKey: CHAT_INGEST_API_TOKEN
   # Per-channel default harness / model / provider / reasoning, keyed by Slack
   # conversation id (the C…/G…/D… id). Each value is an object of optional
   # harness / model / provider / reasoning fields, using the same vocabulary as

@@ -191,6 +191,12 @@ export type SlackbotV2Options = {
   handoffRetryDelaysMs?: readonly number[]
   /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
   idleTimeoutMs?: number
+  /** Optional post-response sink for normalized, idempotent Slack thread snapshots. */
+  interactionSink?: {
+    url: string
+    token: string
+    timeoutMs?: number
+  }
   logger?: Logger
   maxDurationMs?: number
   postgresUrl?: string

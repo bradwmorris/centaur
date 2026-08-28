@@ -71,6 +71,7 @@ import {
   parseSlackWebhookPayload
 } from './slack-events'
 import { isSlackStopCommand } from './stop-command'
+import { sendSlackInteractionSnapshot } from './interaction-sink'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -1500,7 +1501,10 @@ function scheduleExecutionRender(
           trace,
           responseContextBlock
         )
-        if (result === 'complete') return
+        if (result === 'complete') {
+          await publishSlackInteractionSnapshot(options, message, trace)
+          return
+        }
         const delayMs = renderRetryDelayMs(attempt)
         attempt += 1
         traceLog(options, 'slackbotv2_render_retry_scheduled', trace, {
@@ -1691,6 +1695,29 @@ async function renderExecutionAttempt(
       last_event_id: getLastEventId()
     })
     recordRenderAttempt('live', outcome, renderStartedAtMs)
+  }
+}
+
+async function publishSlackInteractionSnapshot(
+  options: SlackbotV2Options,
+  message: SlackbotV2ApiMessage,
+  trace?: SlackbotV2Trace
+): Promise<void> {
+  if (!options.interactionSink) return
+  const startedAtMs = nowMs()
+  try {
+    const outcome = await withSlackApiTimeout(options, 'publish Slack interaction snapshot', () =>
+      sendSlackInteractionSnapshot(options, message)
+    )
+    traceLog(options, 'slackbotv2_interaction_snapshot_complete', trace, {
+      outcome,
+      phase_ms: elapsedMs(startedAtMs)
+    })
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_interaction_snapshot_failed', trace, {
+      error: errorMessage(error),
+      phase_ms: elapsedMs(startedAtMs)
+    })
   }
 }
 
@@ -2163,6 +2190,7 @@ async function recoverRenderObligation(
       lastEventId,
       renderObligation: null
     })
+    await publishSlackInteractionSnapshot(options, obligation.message, trace)
     renderOutcome = 'stream_error_rendered'
     recordRenderAttempt('recovery', renderOutcome, renderStartedAtMs)
     return false
@@ -2278,6 +2306,9 @@ async function recoverRenderObligation(
       last_event_id: lastEventId
     })
     recordRenderAttempt('recovery', renderOutcome, renderStartedAtMs)
+    if (rendered) {
+      await publishSlackInteractionSnapshot(options, obligation.message, trace)
+    }
   }
   return false
 }
