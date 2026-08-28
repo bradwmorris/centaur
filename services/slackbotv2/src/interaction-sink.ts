@@ -24,7 +24,10 @@ export type SlackInteractionSinkEnvelope = {
 }
 
 export function isExplicitInteractionFinish(text: string): boolean {
-  const mentionless = text.replace(/<@[A-Z0-9]+(?:\|[^>]+)?>/gi, '').trim()
+  const mentionless = text
+    .replace(/<@[A-Z0-9]+(?:\|[^>]+)?>/gi, '')
+    .replace(/^@[UW][A-Z0-9]+\s+/i, '')
+    .trim()
   return /^(?:finished|done)[.!]?$/i.test(mentionless)
 }
 

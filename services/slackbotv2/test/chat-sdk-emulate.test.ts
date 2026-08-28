@@ -152,6 +152,116 @@ describe('slackbotv2', () => {
     expect(codexApi.executes[0]?.threadKey).toBe(threadKey(parent.ts))
   })
 
+  it('injects read-only shared context before the Slack execution prompt', async () => {
+    let contextRequest: Request | undefined
+    bot = createTestBot({
+      contextBuilder: {
+        limit: 10,
+        timeoutMs: 500,
+        token: 'shared-context-token',
+        url: 'http://context.test/api/v1/context'
+      },
+      fetch: async (input, init) => {
+        const request = new Request(input, init)
+        if (request.url.startsWith('http://context.test/')) {
+          contextRequest = request
+          return Response.json({
+            data: {
+              objects: [
+                {
+                  connections: [],
+                  description: 'The launch checklist is ready for review.',
+                  id: '00000000-0000-4000-8000-000000000001',
+                  kind: 'task',
+                  title: 'Review launch checklist'
+                }
+              ]
+            }
+          })
+        }
+        return fetch(input, init)
+      }
+    })
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> what is ready for review?`)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-shared-context',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> what is ready for review?`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(contextRequest?.headers.get('authorization')).toBe('Bearer shared-context-token')
+    expect(contextRequest?.headers.get('x-centaur-principal-id')).toBe(`slack:${USER_ID}`)
+    expect(contextRequest?.headers.get('x-centaur-thread-key')).toBe(threadKey(mention.ts))
+    expect(codexApi.executes).toHaveLength(1)
+    const executionInput = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!) as {
+      message?: { content?: Array<{ text?: string }> }
+    }
+    const content = executionInput.message?.content ?? []
+    expect(contentTextWithHeading(content as Array<{ text?: string; type: string }>, '# Centaur OS Shared Context')).toContain(
+      'Review launch checklist'
+    )
+    expect(content.at(-1)?.text).toContain('what is ready for review?')
+  })
+
+  it('still starts the Slack execution when shared context is unavailable', async () => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({
+      contextBuilder: {
+        timeoutMs: 500,
+        token: 'shared-context-token',
+        url: 'http://context.test/api/v1/context'
+      },
+      fetch: async (input, init) => {
+        const request = new Request(input, init)
+        if (request.url.startsWith('http://context.test/')) {
+          return Response.json({ error: 'unavailable' }, { status: 503 })
+        }
+        return fetch(input, init)
+      },
+      logger: captureLogger(logs)
+    })
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> answer without shared context`)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-shared-context-unavailable',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> answer without shared context`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(hasLog(logs, 'slackbotv2_shared_context_degraded')).toBe(true)
+    expect(JSON.stringify(codexApi.executes[0]!.body)).not.toContain(
+      '# Centaur OS Shared Context'
+    )
+  })
+
   it('joins newly-created public channels', async () => {
     bot = createTestBot({ autoJoinCreatedChannels: true })
     const waits: Promise<unknown>[] = []

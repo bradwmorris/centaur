@@ -591,6 +591,14 @@ slackbotv2:
     timeoutMs: 5000
     secretName: ""
     secretKey: CHAT_INGEST_API_TOKEN
+  # Optional read-only context packet fetched immediately before each Slack
+  # execution. Failure is non-blocking so the agent still responds.
+  contextBuilder:
+    url: ""
+    timeoutMs: 1500
+    limit: 10
+    secretName: ""
+    secretKey: AGENT_API_TOKEN
   # Per-channel default harness / model / provider / reasoning, keyed by Slack
   # conversation id (the C…/G…/D… id). Each value is an object of optional
   # harness / model / provider / reasoning fields, using the same vocabulary as

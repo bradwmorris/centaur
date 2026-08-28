@@ -530,6 +530,7 @@ export async function forwardToSessionApi(
       input.model,
       input.executeContextMessages,
       input.contextPreamble,
+      input.sharedContextPreamble,
       input.reasoning,
       input.provider,
       input.metadataModel,
@@ -1333,6 +1334,7 @@ async function executeSession(
   model?: string,
   contextMessages?: SlackbotV2ApiMessage[],
   contextPreamble?: string,
+  sharedContextPreamble?: string,
   reasoning?: string,
   provider?: string,
   metadataModel?: string,
@@ -1370,6 +1372,7 @@ async function executeSession(
       requesterIdentity,
       contextMessages,
       contextPreamble,
+      sharedContextPreamble,
       reasoning,
       provider
     ),
@@ -1578,6 +1581,7 @@ function toCodexInputLines(
   requesterIdentity?: RequesterIdentity,
   contextMessages?: SlackbotV2ApiMessage[],
   contextPreamble?: string,
+  sharedContextPreamble?: string,
   reasoning?: string,
   provider?: string
 ): string[] {
@@ -1594,6 +1598,7 @@ function toCodexInputLines(
       requesterIdentity,
       contextMessages,
       contextPreamble,
+      sharedContextPreamble,
       reasoning,
       provider
     )
@@ -1617,6 +1622,7 @@ function toCodexInputLines(
       requesterIdentity,
       contextMessages,
       contextPreamble,
+      sharedContextPreamble,
       reasoning,
       provider
     )
@@ -1646,6 +1652,7 @@ function toCodexInputLineWithStaged(
   requesterIdentity?: RequesterIdentity,
   contextMessages?: SlackbotV2ApiMessage[],
   contextPreamble?: string,
+  sharedContextPreamble?: string,
   reasoning?: string,
   provider?: string
 ): string {
@@ -1663,7 +1670,8 @@ function toCodexInputLineWithStaged(
         staged,
         requesterIdentity,
         contextMessages,
-        contextPreamble
+        contextPreamble,
+        sharedContextPreamble
       )
     }
   })
@@ -1764,7 +1772,8 @@ function codexInputContent(
   staged: Map<SlackbotV2ApiAttachment, string> = new Map(),
   requesterIdentity?: RequesterIdentity,
   contextMessages?: SlackbotV2ApiMessage[],
-  contextPreamble?: string
+  contextPreamble?: string,
+  sharedContextPreamble?: string
 ): JsonValue[] {
   const content: JsonValue[] = []
   const slackSessionContext = slackUploadSessionContext(message.threadId)
@@ -1774,6 +1783,9 @@ function codexInputContent(
   const requesterContext = requesterIdentityContext(requesterIdentity)
   if (requesterContext) {
     content.push({ type: 'text', text: requesterContext })
+  }
+  if (sharedContextPreamble?.trim()) {
+    content.push({ type: 'text', text: sharedContextPreamble })
   }
   if (contextPreamble?.trim()) {
     content.push({ type: 'text', text: contextPreamble })

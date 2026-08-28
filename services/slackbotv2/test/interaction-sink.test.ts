@@ -89,7 +89,9 @@ describe('Slack interaction sink envelope', () => {
   test('recognizes only an explicit simple finish signal', () => {
     expect(isExplicitInteractionFinish('finished')).toBe(true)
     expect(isExplicitInteractionFinish('<@UAGENT> Done.')).toBe(true)
+    expect(isExplicitInteractionFinish('@UAGENT done')).toBe(true)
     expect(isExplicitInteractionFinish('I finished the draft')).toBe(false)
+    expect(isExplicitInteractionFinish('`@Centaur Test done`')).toBe(false)
   })
 
   test('fails closed when the Slack identity boundary is incomplete', () => {

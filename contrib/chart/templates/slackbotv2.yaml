@@ -125,6 +125,20 @@ spec:
                   name: {{ required "slackbotv2.interactionSink.secretName is required when the sink URL is set" .Values.slackbotv2.interactionSink.secretName | quote }}
                   key: {{ .Values.slackbotv2.interactionSink.secretKey | quote }}
 {{- end }}
+{{- if .Values.slackbotv2.contextBuilder.url }}
+            # Optional, read-only pre-execution shared context packet.
+            - name: SLACKBOTV2_CONTEXT_BUILDER_URL
+              value: {{ .Values.slackbotv2.contextBuilder.url | quote }}
+            - name: SLACKBOTV2_CONTEXT_BUILDER_TIMEOUT_MS
+              value: {{ .Values.slackbotv2.contextBuilder.timeoutMs | quote }}
+            - name: SLACKBOTV2_CONTEXT_BUILDER_LIMIT
+              value: {{ .Values.slackbotv2.contextBuilder.limit | quote }}
+            - name: SLACKBOTV2_CONTEXT_BUILDER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "slackbotv2.contextBuilder.secretName is required when the context builder URL is set" .Values.slackbotv2.contextBuilder.secretName | quote }}
+                  key: {{ .Values.slackbotv2.contextBuilder.secretKey | quote }}
+{{- end }}
 {{- if .Values.slackbotv2.channelDefaults }}
             # Per-channel default harness / model / provider / reasoning, keyed
             # by Slack conversation id (each value an object of harness/model/

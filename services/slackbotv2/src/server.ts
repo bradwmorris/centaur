@@ -79,6 +79,7 @@ const options: SlackbotV2Options = {
       }
     : {},
   idleTimeoutMs: optionalNumberEnv('SESSION_IDLE_TIMEOUT_MS'),
+  contextBuilder: contextBuilderEnv(),
   interactionSink: interactionSinkEnv(),
   maxDurationMs: optionalNumberEnv('SESSION_MAX_DURATION_MS'),
   messageOverridesStrategy: createMessageOverridesStrategy(),
@@ -214,6 +215,23 @@ function interactionSinkEnv(): SlackbotV2Options['interactionSink'] {
     url,
     token,
     timeoutMs: optionalNumberEnv('SLACKBOTV2_INTERACTION_SINK_TIMEOUT_MS')
+  }
+}
+
+function contextBuilderEnv(): SlackbotV2Options['contextBuilder'] {
+  const url = optionalEnv('SLACKBOTV2_CONTEXT_BUILDER_URL')
+  const token = optionalEnv('SLACKBOTV2_CONTEXT_BUILDER_TOKEN')
+  if (!url && !token) return undefined
+  if (!url || !token) {
+    throw new Error(
+      'SLACKBOTV2_CONTEXT_BUILDER_URL and SLACKBOTV2_CONTEXT_BUILDER_TOKEN must be set together'
+    )
+  }
+  return {
+    url,
+    token,
+    limit: optionalNumberEnv('SLACKBOTV2_CONTEXT_BUILDER_LIMIT'),
+    timeoutMs: optionalNumberEnv('SLACKBOTV2_CONTEXT_BUILDER_TIMEOUT_MS')
   }
 }
 

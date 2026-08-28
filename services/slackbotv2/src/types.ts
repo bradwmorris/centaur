@@ -197,6 +197,13 @@ export type SlackbotV2Options = {
     token: string
     timeoutMs?: number
   }
+  /** Optional read-only context packet fetched immediately before an execution. */
+  contextBuilder?: {
+    url: string
+    token: string
+    timeoutMs?: number
+    limit?: number
+  }
   logger?: Logger
   maxDurationMs?: number
   postgresUrl?: string
@@ -278,11 +285,13 @@ export type ForwardSessionInput = {
   afterEventId: number
   executeContextMessages?: SlackbotV2ApiMessage[]
   /**
-   * Prepended to the execute message content as a text part. Set when a
-   * harness restart discards the previous harness's conversation state so the
-   * new harness still sees the thread history.
+   * Prepended to the execute message content as a text part. It may contain
+   * read-only shared context and, after a harness restart, reconstructed
+   * thread history.
    */
   contextPreamble?: string
+  /** Read-only shared business context kept separate from Slack thread history. */
+  sharedContextPreamble?: string
   executionId?: string
   executeMessage?: SlackbotV2ApiMessage
   /** Effective harness selected by Slack policy, including any rollout cohort. */

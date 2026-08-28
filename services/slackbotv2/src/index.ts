@@ -72,6 +72,7 @@ import {
 } from './slack-events'
 import { isSlackStopCommand } from './stop-command'
 import { sendSlackInteractionSnapshot } from './interaction-sink'
+import { fetchSharedContext } from './shared-context'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -1219,6 +1220,34 @@ async function syncThreadMessageToSession(
   const candidateMessages = context ?? [serializedMessage]
   const messagesToAppend = candidateMessages.filter(item => !messageIds.has(item.id))
 
+  let sharedContextPreamble: string | undefined
+  if (shouldStartExecution && input.options.contextBuilder) {
+    const contextBuilderStartedAtMs = nowMs()
+    try {
+      const sharedContext = await fetchSharedContext(
+        input.options.contextBuilder,
+        {
+          principalId: `slack:${slackUserIdForMessage(serializedMessage) ?? 'unknown'}`,
+          query: slackMessagePromptText(serializedMessage),
+          threadKey: thread.id
+        },
+        input.options.fetch
+      )
+      sharedContextPreamble = sharedContext.preamble
+      traceLog(input.options, 'slackbotv2_shared_context_collected', trace, {
+        object_count: sharedContext.objectCount,
+        preamble_chars: sharedContextPreamble?.length ?? 0,
+        truncated: sharedContext.truncated,
+        phase_ms: elapsedMs(contextBuilderStartedAtMs)
+      })
+    } catch (error) {
+      traceWarn(input.options, 'slackbotv2_shared_context_degraded', trace, {
+        error: errorMessage(error),
+        phase_ms: elapsedMs(contextBuilderStartedAtMs)
+      })
+    }
+  }
+
   const forwardInput: ForwardSessionInput = {
     afterEventId: lastEventId,
     executeContextMessages:
@@ -1234,6 +1263,7 @@ async function syncThreadMessageToSession(
     harnessAssignment: shouldStartExecution ? harnessRollout.assignment : undefined,
     metadataHarnessType: shouldStartExecution ? effectiveHarnessType : undefined,
     messages: messagesToAppend,
+    sharedContextPreamble,
     model: shouldStartExecution ? resolvedModel : undefined,
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
     provider: shouldStartExecution ? resolvedProvider : undefined,

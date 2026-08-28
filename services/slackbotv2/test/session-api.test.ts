@@ -477,6 +477,29 @@ describe('Slack display text fallback', () => {
     expect(context?.text).not.toContain('[no text]')
   })
 
+  test('keeps Slack thread history alongside shared business context', async () => {
+    const { fetchFn, requests } = fakeApi()
+    const root = apiMessage('Earlier Slack decision', {
+      id: '1700000000.000001',
+      isMention: false
+    })
+    const current = apiMessage('what is relevant?', { id: '1700000000.000002' })
+
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(current, {
+        executeContextMessages: [root, current],
+        messages: [root, current],
+        sharedContextPreamble: '# Centaur OS Shared Context\n- task: Review launch checklist'
+      })
+    )
+
+    const content = lineContent(executeLine(requests))
+    expect(content.some(part => textPartIncludes(part, 'Review launch checklist'))).toBe(true)
+    expect(content.some(part => textPartIncludes(part, 'Earlier Slack decision'))).toBe(true)
+    expect(content.at(-1)).toEqual({ type: 'text', text: 'what is relevant?' })
+  })
+
   test('falls back to raw Slack attachment text when blocks are absent', async () => {
     const { fetchFn, requests } = fakeApi()
     const message = apiMessage('', {
