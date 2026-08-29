@@ -72,6 +72,11 @@ import {
 } from './slack-events'
 import { isSlackStopCommand } from './stop-command'
 import { sendSlackInteractionSnapshot } from './interaction-sink'
+import {
+  captureEvalUsage,
+  EvalUsageCollector,
+  type EvalUsageAttempt
+} from './eval-usage'
 import { fetchSharedContext } from './shared-context'
 import type {
   ForwardSessionInput,
@@ -1516,6 +1521,7 @@ function scheduleExecutionRender(
   trace?: SlackbotV2Trace,
   responseContextBlock?: SlackContextBlock
 ): void {
+  const usageCollector = evalUsageCollector(options, input)
   const promise = (async () => {
     slackbotMetrics.activeLiveRenders.inc()
     try {
@@ -1528,11 +1534,17 @@ function scheduleExecutionRender(
           input,
           getLastEventId,
           assistantStatusVisible,
+          usageCollector,
           trace,
           responseContextBlock
         )
         if (result === 'complete') {
-          await publishSlackInteractionSnapshot(options, message, trace)
+          await publishSlackInteractionSnapshot(
+            options,
+            message,
+            trace,
+            usageCollector.finish()
+          )
           return
         }
         const delayMs = renderRetryDelayMs(attempt)
@@ -1575,6 +1587,7 @@ async function renderExecutionAttempt(
   input: ForwardSessionInput,
   getLastEventId: () => number,
   assistantStatusVisible: boolean,
+  usageCollector: EvalUsageCollector,
   trace?: SlackbotV2Trace,
   responseContextBlock?: SlackContextBlock
 ): Promise<'complete' | 'retry'> {
@@ -1586,7 +1599,15 @@ async function renderExecutionAttempt(
   try {
     const streamResult = await renderExecutionStream(
       thread,
-      clearRejectedStickyModel(thread, input, streamSessionAfterHandoff(options, input), options),
+      captureEvalUsage(
+        clearRejectedStickyModel(
+          thread,
+          input,
+          streamSessionAfterHandoff(options, input),
+          options
+        ),
+        usageCollector
+      ),
       message,
       options,
       trace,
@@ -1731,13 +1752,14 @@ async function renderExecutionAttempt(
 async function publishSlackInteractionSnapshot(
   options: SlackbotV2Options,
   message: SlackbotV2ApiMessage,
-  trace?: SlackbotV2Trace
+  trace?: SlackbotV2Trace,
+  agentUsage: EvalUsageAttempt[] = []
 ): Promise<void> {
   if (!options.interactionSink) return
   const startedAtMs = nowMs()
   try {
     const outcome = await withSlackApiTimeout(options, 'publish Slack interaction snapshot', () =>
-      sendSlackInteractionSnapshot(options, message)
+      sendSlackInteractionSnapshot(options, message, agentUsage)
     )
     traceLog(options, 'slackbotv2_interaction_snapshot_complete', trace, {
       outcome,
@@ -1749,6 +1771,34 @@ async function publishSlackInteractionSnapshot(
       phase_ms: elapsedMs(startedAtMs)
     })
   }
+}
+
+function evalUsageCollector(
+  options: SlackbotV2Options,
+  input: Pick<
+    ForwardSessionInput,
+    | 'executionId'
+    | 'threadId'
+    | 'metadataModel'
+    | 'model'
+    | 'reasoning'
+    | 'metadataHarnessType'
+  >
+): EvalUsageCollector {
+  const usage = options.interactionSink?.usage
+  return new EvalUsageCollector({
+    component: 'centaur_agent',
+    provider: usage?.provider ?? 'unknown',
+    model_id: input.metadataModel ?? input.model ?? 'unknown',
+    display_tier: input.metadataModel ?? input.model,
+    execution_type: 'codex_harness',
+    auth_mode: usage?.authMode ?? 'unknown',
+    upstream_service: usage?.upstreamService ?? 'unknown',
+    billing_mode: usage?.billingMode ?? 'unknown',
+    reasoning_effort: input.reasoning,
+    source_thread_id: input.threadId,
+    source_execution_id: input.executionId ?? 'unknown'
+  })
 }
 
 async function* clearRejectedStickyModel(
@@ -2196,6 +2246,7 @@ async function recoverRenderObligation(
     threadId,
     trace
   }
+  const usageCollector = evalUsageCollector(options, input)
   const renderStartedAtMs = nowMs()
   let renderOutcome = 'failure'
 
@@ -2220,7 +2271,12 @@ async function recoverRenderObligation(
       lastEventId,
       renderObligation: null
     })
-    await publishSlackInteractionSnapshot(options, obligation.message, trace)
+    await publishSlackInteractionSnapshot(
+      options,
+      obligation.message,
+      trace,
+      usageCollector.finish('The recovered execution stream failed before reporting usage.')
+    )
     renderOutcome = 'stream_error_rendered'
     recordRenderAttempt('recovery', renderOutcome, renderStartedAtMs)
     return false
@@ -2234,7 +2290,7 @@ async function recoverRenderObligation(
     })
     const streamResult = await renderRecoveredExecutionStream(
       thread,
-      streamOpenedSession(input, openedStream),
+      captureEvalUsage(streamOpenedSession(input, openedStream), usageCollector),
       obligation.message,
       options,
       trace
@@ -2337,7 +2393,12 @@ async function recoverRenderObligation(
     })
     recordRenderAttempt('recovery', renderOutcome, renderStartedAtMs)
     if (rendered) {
-      await publishSlackInteractionSnapshot(options, obligation.message, trace)
+      await publishSlackInteractionSnapshot(
+        options,
+        obligation.message,
+        trace,
+        usageCollector.finish()
+      )
     }
   }
   return false

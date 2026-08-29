@@ -119,6 +119,14 @@ spec:
               value: {{ .Values.slackbotv2.interactionSink.url | quote }}
             - name: SLACKBOTV2_INTERACTION_SINK_TIMEOUT_MS
               value: {{ .Values.slackbotv2.interactionSink.timeoutMs | quote }}
+            - name: SLACKBOTV2_INTERACTION_SINK_USAGE_PROVIDER
+              value: {{ .Values.slackbotv2.interactionSink.usage.provider | quote }}
+            - name: SLACKBOTV2_INTERACTION_SINK_USAGE_AUTH_MODE
+              value: {{ .Values.slackbotv2.interactionSink.usage.authMode | quote }}
+            - name: SLACKBOTV2_INTERACTION_SINK_USAGE_BILLING_MODE
+              value: {{ .Values.slackbotv2.interactionSink.usage.billingMode | quote }}
+            - name: SLACKBOTV2_INTERACTION_SINK_USAGE_UPSTREAM_SERVICE
+              value: {{ .Values.slackbotv2.interactionSink.usage.upstreamService | quote }}
             - name: SLACKBOTV2_INTERACTION_SINK_TOKEN
               valueFrom:
                 secretKeyRef:

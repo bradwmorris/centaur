@@ -148,6 +148,7 @@ describe('Slack interaction sink envelope', () => {
       expect(sinkRequest.authorization).toBe(`Bearer ${'i'.repeat(32)}`)
       expect(sinkRequest.body?.messages).toHaveLength(2)
       expect(sinkRequest.body?.interaction_finished).toBe(true)
+      expect(sinkRequest.body?.agent_usage).toEqual([])
     } finally {
       slack.stop(true)
     }
