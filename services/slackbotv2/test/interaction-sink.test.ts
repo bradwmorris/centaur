@@ -133,7 +133,7 @@ describe('Slack interaction sink envelope', () => {
         signingSecret: 'test-signing-secret',
         slackApiUrl: `http://127.0.0.1:${slack.port}/api/`,
         interactionSink: {
-          url: 'http://centaur-os.test/api/v1/ingest/slack/interactions',
+          url: 'http://centaur-context.test/api/v1/ingest/slack/interactions',
           token: 'i'.repeat(32)
         },
         fetch: async (_input, init) => {

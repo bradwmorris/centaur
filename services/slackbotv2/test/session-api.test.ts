@@ -490,7 +490,7 @@ describe('Slack display text fallback', () => {
       forwardInput(current, {
         executeContextMessages: [root, current],
         messages: [root, current],
-        sharedContextPreamble: '# Centaur OS Shared Context\n- task: Review launch checklist'
+        sharedContextPreamble: '# Centaur Context\n- task: Review launch checklist'
       })
     )
 
