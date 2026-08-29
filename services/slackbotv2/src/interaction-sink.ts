@@ -25,6 +25,11 @@ export type SlackInteractionSinkEnvelope = {
   agent_usage?: EvalUsageAttempt[]
 }
 
+export type SlackInteractionSnapshotResult = {
+  chatObjectId?: string
+  outcome: 'disabled' | 'skipped' | 'sent'
+}
+
 export function isExplicitInteractionFinish(text: string): boolean {
   const mentionless = text
     .replace(/<@[A-Z0-9]+(?:\|[^>]+)?>/gi, '')
@@ -70,15 +75,16 @@ export function buildSlackInteractionEnvelope(input: {
 export async function sendSlackInteractionSnapshot(
   options: SlackbotV2Options,
   currentMessage: SlackbotV2ApiMessage,
-  agentUsage: EvalUsageAttempt[] = []
-): Promise<'disabled' | 'skipped' | 'sent'> {
+  agentUsage: EvalUsageAttempt[] = [],
+  overrides: { interactionFinished?: boolean } = {}
+): Promise<SlackInteractionSnapshotResult> {
   const sink = options.interactionSink
-  if (!sink) return 'disabled'
+  if (!sink) return { outcome: 'disabled' }
   const raw = asRecord(currentMessage.raw)
   const channel = stringValue(raw.channel) ?? threadPart(currentMessage.threadId, 1)
   const threadTs =
     stringValue(raw.thread_ts) ?? stringValue(raw.ts) ?? threadPart(currentMessage.threadId, 2)
-  if (!channel || !threadTs) return 'skipped'
+  if (!channel || !threadTs) return { outcome: 'skipped' }
 
   const replies: JsonObject[] = []
   let cursor: string | undefined
@@ -105,7 +111,10 @@ export async function sendSlackInteractionSnapshot(
     replies,
     userName: options.userName
   })
-  if (!envelope) return 'skipped'
+  if (!envelope) return { outcome: 'skipped' }
+  if (overrides.interactionFinished !== undefined) {
+    envelope.interaction_finished = overrides.interactionFinished
+  }
 
   const fetchFn = options.fetch ?? fetch
   const controller = new AbortController()
@@ -123,10 +132,21 @@ export async function sendSlackInteractionSnapshot(
     if (!response.ok) {
       throw new Error(`interaction sink rejected the snapshot with HTTP ${response.status}`)
     }
-    return 'sent'
+    const payload: unknown = await response.json()
+    return { chatObjectId: parseChatObjectId(payload), outcome: 'sent' }
   } finally {
     clearTimeout(timeout)
   }
+}
+
+function parseChatObjectId(payload: unknown): string {
+  const data = asRecord(asRecord(payload).data)
+  const value = stringValue(data.chat_object_id)
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+  if (!value || !uuid.test(value)) {
+    throw new Error('interaction sink response has an invalid chat_object_id')
+  }
+  return value
 }
 
 function slackInteractionMessage(

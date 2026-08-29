@@ -259,6 +259,8 @@ export type SlackbotV2 = {
 
 export type SlackbotV2ThreadState = {
   activeExecution?: boolean
+  /** Canonical Centaur Context Chat returned by the authenticated interaction sink. */
+  contextChatObjectId?: string
   executedMessageIds?: string[]
   forwardedMessageIds?: string[]
   /** Last thread-level harness selected by Slack flags. Null clears persisted state. */

@@ -13,6 +13,7 @@ export type SharedContextConfig = {
 }
 
 export type SharedContextInput = {
+  chatObjectId: string
   principalId: string
   query: string
   threadKey: string
@@ -50,6 +51,7 @@ export async function fetchSharedContext(
 
   const url = new URL(config.url)
   url.searchParams.set('q', query)
+  url.searchParams.set('chat_object_id', compactText(input.chatObjectId, 100))
   url.searchParams.set('limit', String(boundedLimit(config.limit)))
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs ?? 1_500)
