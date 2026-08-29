@@ -495,6 +495,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   app.post('/api/slack/actions', handleSlackWebhook)
   app.post('/api/slack/options', handleSlackWebhook)
   app.post('/api/slack/commands', handleSlackWebhook)
+  if (options.instanceId) {
+    app.post(`/api/webhooks/slack/${options.instanceId}`, handleSlackWebhook)
+  }
 
   if (options.recoverRenderObligationsOnStart !== false) {
     scheduleRenderObligationRecovery(chat, state, options, stateConnected)
@@ -1153,10 +1156,15 @@ async function syncThreadMessageToSession(
   const includeResponseMetadata =
     responseMetadataMode === 'always' ||
     (responseMetadataMode === 'first' && isFirstAssistantMessage)
+  const sessionThreadId = centaurSessionThreadKey(
+    input.options,
+    serializedMessage,
+    thread.id
+  )
   let responseContextBlock = isFirstAssistantMessage || includeResponseMetadata
     ? buildSlackResponseContextBlock({
         consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
-        threadKey: thread.id,
+        threadKey: sessionThreadId,
         harnessType: effectiveHarnessType,
         metadataEnabled: includeResponseMetadata,
         model: effectiveModel,
@@ -1293,7 +1301,7 @@ async function syncThreadMessageToSession(
       lastEventId = Math.max(lastEventId, eventId)
     },
     openStream: false,
-    threadId: thread.id,
+    threadId: sessionThreadId,
     trace
   }
 
@@ -1368,7 +1376,8 @@ async function syncThreadMessageToSession(
       renderObligation: {
         afterEventId: lastEventId,
         executionId: execution.execution_id,
-        message: serializedMessage
+        message: serializedMessage,
+        sessionThreadId
       }
     })
     await indexRenderObligation(input.state, {
@@ -1827,6 +1836,17 @@ function canonicalSlackContextThreadKey(
     return `slack:${message.teamId}:${parts[1]}:${parts[2]}`
   }
   return threadId
+}
+
+function centaurSessionThreadKey(
+  options: SlackbotV2Options,
+  message: SlackbotV2ApiMessage,
+  threadId: string
+): string {
+  if (!options.instanceId) return threadId
+  const canonical = canonicalSlackContextThreadKey(message, threadId).split(':')
+  if (canonical.length !== 4) return `${threadId}:bot-${options.instanceId}`
+  return `${canonical[0]}:${canonical[1]}:bot-${options.instanceId}:${canonical[2]}:${canonical[3]}`
 }
 
 function evalUsageCollector(
@@ -2299,7 +2319,7 @@ async function recoverRenderObligation(
       lastEventId = Math.max(lastEventId, eventId)
     },
     openStream: false,
-    threadId,
+    threadId: obligation.sessionThreadId ?? threadId,
     trace
   }
   const usageCollector = evalUsageCollector(options, input)

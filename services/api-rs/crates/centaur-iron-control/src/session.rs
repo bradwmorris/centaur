@@ -16,6 +16,7 @@ use crate::principal::{
     derive_principal_with_slack_team, derive_slack_requester_principal, is_direct_message,
     slack_conversation_id,
 };
+use crate::util::slugify;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct SessionPrincipalMetadata<'a> {
@@ -23,6 +24,7 @@ struct SessionPrincipalMetadata<'a> {
     slack_team_id: Option<&'a str>,
     slack_user_email: Option<&'a str>,
     conversation_name: Option<&'a str>,
+    slackbot_instance_id: Option<&'a str>,
 }
 
 impl<'a> SessionPrincipalMetadata<'a> {
@@ -44,6 +46,7 @@ impl<'a> SessionPrincipalMetadata<'a> {
                 .or_else(|| metadata.get("linear_conversation_name"))
                 .or_else(|| metadata.get("teams_conversation_name"))
                 .and_then(Value::as_str),
+            slackbot_instance_id: metadata.get("slackbot_instance_id").and_then(Value::as_str),
         }
     }
 }
@@ -81,6 +84,7 @@ impl SessionRegistrar {
             metadata.slack_team_id,
             metadata.conversation_name,
         )?;
+        let principal = scope_slackbot_principal(principal, metadata.slackbot_instance_id);
         let mut input = principal.to_principal_input();
         apply_slack_dm_email(thread_key, metadata.slack_user_email, &mut input);
         let exists = self.merge_existing_labels(&mut input).await?;
@@ -136,6 +140,10 @@ impl SessionRegistrar {
         ) else {
             return Ok(None);
         };
+        let principal = scope_slackbot_principal(
+            principal,
+            metadata.get("slackbot_instance_id").and_then(Value::as_str),
+        );
         let mut input = principal.to_principal_input();
         set_slack_email(
             &mut input,
@@ -166,6 +174,22 @@ impl SessionRegistrar {
         input.labels = labels;
         Ok(true)
     }
+}
+
+fn scope_slackbot_principal(
+    mut principal: crate::principal::PrincipalRef,
+    instance_id: Option<&str>,
+) -> crate::principal::PrincipalRef {
+    let Some(instance_id) = instance_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return principal;
+    };
+    let instance_slug = slugify(instance_id);
+    principal.foreign_id = format!("slackbot-{instance_slug}-{}", principal.foreign_id);
+    principal.name = format!("{} via {instance_id}", principal.name);
+    principal
+        .labels
+        .insert("slackbot_instance_id".to_owned(), instance_id.to_owned());
+    principal
 }
 
 fn eligible_slack_requester_team(metadata: &Value) -> Option<&str> {
@@ -307,6 +331,28 @@ mod tests {
             })))
             .slack_user_email,
             Some("ada@example.com")
+        );
+    }
+
+    #[test]
+    fn slackbot_instances_receive_distinct_principals() {
+        let base = derive_principal("slack:T123:C456:ts", Some("U1"), Some("general"))
+            .expect("Slack channel principal");
+        let editor = scope_slackbot_principal(base.clone(), Some("editor"));
+        let researcher = scope_slackbot_principal(base, Some("researcher"));
+
+        assert_eq!(editor.foreign_id, "slackbot-editor-slack-channel-t123-c456");
+        assert_eq!(
+            researcher.foreign_id,
+            "slackbot-researcher-slack-channel-t123-c456"
+        );
+        assert_ne!(editor.foreign_id, researcher.foreign_id);
+        assert_eq!(
+            editor
+                .labels
+                .get("slackbot_instance_id")
+                .map(String::as_str),
+            Some("editor")
         );
     }
 

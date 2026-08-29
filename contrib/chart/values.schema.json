@@ -439,6 +439,21 @@
     "slackbotv2": {
       "type": "object",
       "properties": {
+        "instances": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$" },
+              "personaId": { "type": "string", "minLength": 1 },
+              "userName": { "type": "string" },
+              "secretName": { "type": "string", "minLength": 1 },
+              "botTokenSecretKey": { "type": "string" },
+              "signingSecretSecretKey": { "type": "string" }
+            },
+            "required": ["id", "personaId", "secretName"]
+          }
+        },
         "mcpPublicUrl": { "type": "string" },
         "codexNanocodexRolloutPercent": {
           "type": "integer",

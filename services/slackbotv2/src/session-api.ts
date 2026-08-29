@@ -848,6 +848,7 @@ async function postCreateSession(
       source: 'slackbotv2',
       platform: 'slack',
       thread_id: threadId,
+      ...slackbotInstanceMetadata(options),
       ...slackHomeTeamMetadata(options),
       ...sessionRequesterMetadata(message, requesterIdentity),
       ...(harnessAssignment
@@ -855,6 +856,7 @@ async function postCreateSession(
         : {}),
       ...(conversationName ? { slack_conversation_name: conversationName } : {})
     },
+    ...(options.personaId ? { persona_id: options.personaId } : {}),
     ...(onHarnessConflict ? { on_harness_conflict: onHarnessConflict } : {})
   }
   return fetchWithTimeout(
@@ -1547,10 +1549,16 @@ function sessionMetadata(
     user_id: message.author.userId,
     user_name: message.author.userName,
     ...sessionSlackTextMetadata(message),
+    ...slackbotInstanceMetadata(options),
     ...slackHomeTeamMetadata(options),
     ...sessionRequesterMetadata(message, requesterIdentity),
     ...extra
   }
+}
+
+function slackbotInstanceMetadata(options: SlackbotV2Options): JsonObject {
+  const instanceId = stringValue(options.instanceId)
+  return instanceId ? { slackbot_instance_id: instanceId } : {}
 }
 
 function slackHomeTeamMetadata(options: SlackbotV2Options): JsonObject {

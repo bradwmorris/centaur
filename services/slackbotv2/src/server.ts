@@ -13,6 +13,7 @@ const botToken = requiredEnv('SLACK_BOT_TOKEN')
 const signingSecret = requiredEnv('SLACK_SIGNING_SECRET')
 const slackApiUrl = optionalEnv('SLACK_API_URL')
 const slackApiTimeoutMs = optionalNumberEnv('SLACKBOTV2_SLACK_API_TIMEOUT_MS')
+const instanceId = slackbotInstanceIdEnv()
 const botUserId = await resolveSlackBotUserId({
   botToken,
   configuredBotUserId: optionalEnv('SLACK_BOT_USER_ID'),
@@ -79,6 +80,7 @@ const options: SlackbotV2Options = {
       }
     : {},
   idleTimeoutMs: optionalNumberEnv('SESSION_IDLE_TIMEOUT_MS'),
+  instanceId,
   contextBuilder: contextBuilderEnv(),
   interactionSink: interactionSinkEnv(),
   maxDurationMs: optionalNumberEnv('SESSION_MAX_DURATION_MS'),
@@ -87,6 +89,7 @@ const options: SlackbotV2Options = {
     optionalEnv('SLACKBOTV2_DATABASE_URL') ??
     optionalEnv('DATABASE_URL') ??
     optionalEnv('POSTGRES_URL'),
+  personaId: optionalEnv('SLACKBOTV2_PERSONA_ID'),
   renderRecoveryMaxObligationAgeMs: optionalNumberEnv(
     'SLACKBOTV2_RENDER_RECOVERY_MAX_OBLIGATION_AGE_MS'
   ),
@@ -94,7 +97,9 @@ const options: SlackbotV2Options = {
   signingSecret,
   slackApiUrl,
   slackApiTimeoutMs,
-  stateKeyPrefix: optionalEnv('SLACKBOTV2_STATE_KEY_PREFIX'),
+  stateKeyPrefix:
+    optionalEnv('SLACKBOTV2_STATE_KEY_PREFIX')
+    ?? (instanceId ? `centaur-slackbotv2:${instanceId}` : undefined),
   userName: stringEnv('SLACKBOTV2_USER_NAME', 'centaur'),
   logger: consoleLogger
 }
@@ -112,6 +117,8 @@ console.log(
     level: 'info',
     event: 'slackbotv2_started',
     service: 'slackbotv2',
+    instance_id: options.instanceId,
+    persona_id: options.personaId,
     activity_summary_status_enabled: options.activitySummaryStatusEnabled,
     auto_join_created_channels_enabled: options.autoJoinCreatedChannels,
     message_overrides_strategy: messageOverridesStrategyMode,
@@ -243,6 +250,14 @@ function enumEnv<const T extends readonly string[]>(
   const value = optionalEnv(name) ?? fallback
   if (!values.includes(value)) {
     throw new Error(`${name} must be one of ${values.join(', ')}`)
+  }
+  return value
+}
+
+function slackbotInstanceIdEnv(): string | undefined {
+  const value = optionalEnv('SLACKBOTV2_INSTANCE_ID')
+  if (value && !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value)) {
+    throw new Error('SLACKBOTV2_INSTANCE_ID must be a lowercase DNS label')
   }
   return value
 }

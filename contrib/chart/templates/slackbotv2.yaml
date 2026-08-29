@@ -1,99 +1,128 @@
 {{- if .Values.slackbotv2.enabled }}
-{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
-{{- $console := include "centaur.consoleValues" . | fromYaml -}}
+{{- $root := . -}}
+{{- $targets := list (dict "id" "" "config" .Values.slackbotv2) -}}
+{{- if gt (len (.Values.slackbotv2.instances | default list)) 0 -}}
+{{- $targets = list -}}
+{{- $seenInstanceIds := dict -}}
+{{- range $instance := .Values.slackbotv2.instances -}}
+{{- $instanceId := required "slackbotv2.instances[].id is required" $instance.id -}}
+{{- if hasKey $seenInstanceIds $instanceId -}}{{- fail (printf "duplicate slackbotv2 instance id %q" $instanceId) -}}{{- end -}}
+{{- $_ := set $seenInstanceIds $instanceId true -}}
+{{- $targets = append $targets (dict "id" $instanceId "config" (mergeOverwrite (deepCopy $root.Values.slackbotv2) $instance)) -}}
+{{- end -}}
+{{- end -}}
+{{- range $target := $targets }}
+{{- $id := $target.id -}}
+{{- $slackbot := $target.config -}}
+{{- $component := "slackbotv2" -}}
+{{- if $id -}}{{- $component = printf "slackbotv2-%s" $id -}}{{- end -}}
+{{- $credentialSecretName := include "centaur.secretEnvName" $root -}}
+{{- if $slackbot.secretName -}}{{- $credentialSecretName = $slackbot.secretName -}}{{- end -}}
+{{- $apiRsName := include "centaur.componentName" (dict "root" $root "component" "api-rs") -}}
+{{- $console := include "centaur.consoleValues" $root | fromYaml -}}
 {{- $slackbotV2MetricsAnnotations := dict -}}
-{{- if .Values.slackbotv2.metrics.scrapeAnnotations -}}
-{{- $slackbotV2MetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.slackbotv2.metrics.path "prometheus.io/port" "3001" -}}
-{{- $slackbotV2MetricsAnnotations = mergeOverwrite $slackbotV2MetricsAnnotations (.Values.slackbotv2.metrics.annotations | default dict) -}}
+{{- if $slackbot.metrics.scrapeAnnotations -}}
+{{- $slackbotV2MetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" $slackbot.metrics.path "prometheus.io/port" "3001" -}}
+{{- $slackbotV2MetricsAnnotations = mergeOverwrite $slackbotV2MetricsAnnotations ($slackbot.metrics.annotations | default dict) -}}
 {{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}
+  name: {{ include "centaur.componentName" (dict "root" $root "component" $component) }}
   labels:
-{{ include "centaur.componentLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
+{{ include "centaur.componentLabels" (dict "root" $root "component" $component) | nindent 4 }}
 spec:
-  replicas: {{ .Values.slackbotv2.replicaCount }}
+  replicas: {{ $slackbot.replicaCount }}
   selector:
     matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 6 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" $root "component" $component) | nindent 6 }}
   template:
     metadata:
       annotations:
-        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" $root }}
 {{- with $slackbotV2MetricsAnnotations }}
 {{ toYaml . | nindent 8 }}
 {{- end }}
       labels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 8 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" $root "component" $component) | nindent 8 }}
+        centaur.ai/slackbotv2: "true"
+{{- if $id }}
+        centaur.ai/slackbot-instance: {{ $id | quote }}
+{{- end }}
         centaur.ai/metrics: slackbotv2
     spec:
       automountServiceAccountToken: false
-      {{- with .Values.global.imagePullSecrets }}
+      {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: slackbotv2
-          image: {{ printf "%s:%s" .Values.slackbotv2.image.repository .Values.slackbotv2.image.tag | quote }}
-          imagePullPolicy: {{ .Values.slackbotv2.image.pullPolicy }}
+          image: {{ printf "%s:%s" $slackbot.image.repository $slackbot.image.tag | quote }}
+          imagePullPolicy: {{ $slackbot.image.pullPolicy }}
           env:
             - name: PORT
               value: "3001"
             - name: CENTAUR_API_URL
-              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+              value: {{ printf "http://%s:%v" $apiRsName $root.Values.apiRs.port | quote }}
             # New threads without an explicit --claude/--amp/--codex/
             # --nanocodex flag run the deployment's default harness.
             - name: SLACKBOTV2_DEFAULT_HARNESS
-              value: {{ .Values.sandbox.harnessEngine | quote }}
+              value: {{ $root.Values.sandbox.harnessEngine | quote }}
             - name: SLACKBOTV2_CODEX_NANOCODEX_ROLLOUT_PERCENT
-              value: {{ .Values.slackbotv2.codexNanocodexRolloutPercent | quote }}
+              value: {{ $slackbot.codexNanocodexRolloutPercent | quote }}
             - name: SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sSLACK_BOT_TOKEN" .Values.secretManager.envPrefix }}
+                  name: {{ $credentialSecretName }}
+                  key: {{ $slackbot.botTokenSecretKey | default (printf "%sSLACK_BOT_TOKEN" $root.Values.secretManager.envPrefix) }}
             - name: SLACK_SIGNING_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sSLACK_SIGNING_SECRET" .Values.secretManager.envPrefix }}
+                  name: {{ $credentialSecretName }}
+                  key: {{ $slackbot.signingSecretSecretKey | default (printf "%sSLACK_SIGNING_SECRET" $root.Values.secretManager.envPrefix) }}
+{{- if $id }}
+            - name: SLACKBOTV2_INSTANCE_ID
+              value: {{ $id | quote }}
+            - name: SLACKBOTV2_PERSONA_ID
+              value: {{ required "slackbotv2.instances[].personaId is required" $slackbot.personaId | quote }}
+{{- end }}
             - name: SLACKBOT_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sSLACKBOT_API_KEY" .Values.secretManager.envPrefix }}
+                  name: {{ include "centaur.secretEnvName" $root }}
+                  key: {{ printf "%sSLACKBOT_API_KEY" $root.Values.secretManager.envPrefix }}
             - name: SLACKBOTV2_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+                  name: {{ include "centaur.secretEnvName" $root }}
+                  key: {{ printf "%sDATABASE_URL" $root.Values.secretManager.envPrefix }}
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sOPENAI_API_KEY" .Values.secretManager.envPrefix }}
+                  name: {{ include "centaur.secretEnvName" $root }}
+                  key: {{ printf "%sOPENAI_API_KEY" $root.Values.secretManager.envPrefix }}
                   optional: true
             - name: SLACKBOTV2_USER_NAME
-              value: {{ .Values.slackbotv2.userName | quote }}
+              value: {{ $slackbot.userName | quote }}
             - name: SLACKBOTV2_ACTIVITY_SUMMARY_STATUS_ENABLED
-              value: {{ .Values.apiRs.activitySummary.enabled | quote }}
+              value: {{ $root.Values.apiRs.activitySummary.enabled | quote }}
             - name: SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS
-              value: {{ .Values.slackbotv2.autoJoinCreatedChannels | quote }}
+              value: {{ $slackbot.autoJoinCreatedChannels | quote }}
             - name: SLACKBOTV2_RESPONSE_METADATA_MODE
-              value: {{ .Values.slackbotv2.responseMetadataMode | quote }}
+              value: {{ $slackbot.responseMetadataMode | quote }}
             - name: SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED
-              value: {{ .Values.slackbotv2.responseServiceTierEnabled | quote }}
+              value: {{ $slackbot.responseServiceTierEnabled | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_STRATEGY
-              value: {{ .Values.slackbotv2.messageOverridesStrategy.mode | quote }}
+              value: {{ $slackbot.messageOverridesStrategy.mode | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_MODEL
-              value: {{ .Values.slackbotv2.messageOverridesStrategy.model | quote }}
+              value: {{ $slackbot.messageOverridesStrategy.model | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_OPENAI_BASE_URL
-              value: {{ .Values.slackbotv2.messageOverridesStrategy.openaiBaseUrl | quote }}
+              value: {{ $slackbot.messageOverridesStrategy.openaiBaseUrl | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_TIMEOUT_MS
-              value: {{ .Values.slackbotv2.messageOverridesStrategy.timeoutMs | quote }}
+              value: {{ $slackbot.messageOverridesStrategy.timeoutMs | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_MAX_OUTPUT_TOKENS
-              value: {{ .Values.slackbotv2.messageOverridesStrategy.maxOutputTokens | quote }}
+              value: {{ $slackbot.messageOverridesStrategy.maxOutputTokens | quote }}
 {{- if $console.publicUrl }}
             # Public origin of the Console UI (matches the Console's own
             # CENTAUR_CONSOLE_PUBLIC_URL). When set, the first assistant message
@@ -101,53 +130,53 @@ spec:
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ $console.publicUrl | quote }}
 {{- end }}
-{{- if .Values.slackbotv2.assistantStatus }}
+{{- if $slackbot.assistantStatus }}
             - name: SLACKBOTV2_ASSISTANT_STATUS
-              value: {{ .Values.slackbotv2.assistantStatus | quote }}
+              value: {{ $slackbot.assistantStatus | quote }}
 {{- end }}
-{{- if .Values.slackbotv2.externalOrgAllowlist }}
+{{- if $slackbot.externalOrgAllowlist }}
             - name: SLACKBOT_EXTERNAL_ORG_ALLOWLIST
-              value: {{ .Values.slackbotv2.externalOrgAllowlist | quote }}
+              value: {{ $slackbot.externalOrgAllowlist | quote }}
 {{- end }}
-{{- if .Values.slackbotv2.triggerBotAllowlist }}
+{{- if $slackbot.triggerBotAllowlist }}
             - name: SLACKBOT_TRIGGER_BOT_ALLOWLIST
-              value: {{ .Values.slackbotv2.triggerBotAllowlist | quote }}
+              value: {{ $slackbot.triggerBotAllowlist | quote }}
 {{- end }}
-{{- if .Values.slackbotv2.interactionSink.url }}
+{{- if $slackbot.interactionSink.url }}
             # Optional, non-blocking post-response transcript export.
             - name: SLACKBOTV2_INTERACTION_SINK_URL
-              value: {{ .Values.slackbotv2.interactionSink.url | quote }}
+              value: {{ $slackbot.interactionSink.url | quote }}
             - name: SLACKBOTV2_INTERACTION_SINK_TIMEOUT_MS
-              value: {{ .Values.slackbotv2.interactionSink.timeoutMs | quote }}
+              value: {{ $slackbot.interactionSink.timeoutMs | quote }}
             - name: SLACKBOTV2_INTERACTION_SINK_USAGE_PROVIDER
-              value: {{ .Values.slackbotv2.interactionSink.usage.provider | quote }}
+              value: {{ $slackbot.interactionSink.usage.provider | quote }}
             - name: SLACKBOTV2_INTERACTION_SINK_USAGE_AUTH_MODE
-              value: {{ .Values.slackbotv2.interactionSink.usage.authMode | quote }}
+              value: {{ $slackbot.interactionSink.usage.authMode | quote }}
             - name: SLACKBOTV2_INTERACTION_SINK_USAGE_BILLING_MODE
-              value: {{ .Values.slackbotv2.interactionSink.usage.billingMode | quote }}
+              value: {{ $slackbot.interactionSink.usage.billingMode | quote }}
             - name: SLACKBOTV2_INTERACTION_SINK_USAGE_UPSTREAM_SERVICE
-              value: {{ .Values.slackbotv2.interactionSink.usage.upstreamService | quote }}
+              value: {{ $slackbot.interactionSink.usage.upstreamService | quote }}
             - name: SLACKBOTV2_INTERACTION_SINK_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ required "slackbotv2.interactionSink.secretName is required when the sink URL is set" .Values.slackbotv2.interactionSink.secretName | quote }}
-                  key: {{ .Values.slackbotv2.interactionSink.secretKey | quote }}
+                  name: {{ required "slackbotv2.interactionSink.secretName is required when the sink URL is set" $slackbot.interactionSink.secretName | quote }}
+                  key: {{ $slackbot.interactionSink.secretKey | quote }}
 {{- end }}
-{{- if .Values.slackbotv2.contextBuilder.url }}
+{{- if $slackbot.contextBuilder.url }}
             # Optional, read-only pre-execution shared context packet.
             - name: SLACKBOTV2_CONTEXT_BUILDER_URL
-              value: {{ .Values.slackbotv2.contextBuilder.url | quote }}
+              value: {{ $slackbot.contextBuilder.url | quote }}
             - name: SLACKBOTV2_CONTEXT_BUILDER_TIMEOUT_MS
-              value: {{ .Values.slackbotv2.contextBuilder.timeoutMs | quote }}
+              value: {{ $slackbot.contextBuilder.timeoutMs | quote }}
             - name: SLACKBOTV2_CONTEXT_BUILDER_LIMIT
-              value: {{ .Values.slackbotv2.contextBuilder.limit | quote }}
+              value: {{ $slackbot.contextBuilder.limit | quote }}
             - name: SLACKBOTV2_CONTEXT_BUILDER_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ required "slackbotv2.contextBuilder.secretName is required when the context builder URL is set" .Values.slackbotv2.contextBuilder.secretName | quote }}
-                  key: {{ .Values.slackbotv2.contextBuilder.secretKey | quote }}
+                  name: {{ required "slackbotv2.contextBuilder.secretName is required when the context builder URL is set" $slackbot.contextBuilder.secretName | quote }}
+                  key: {{ $slackbot.contextBuilder.secretKey | quote }}
 {{- end }}
-{{- if .Values.slackbotv2.channelDefaults }}
+{{- if $slackbot.channelDefaults }}
             # Per-channel default harness / model / provider / reasoning, keyed
             # by Slack conversation id (each value an object of harness/model/
             # provider/reasoning fields, e.g. { harness: claude, model: opus }).
@@ -155,29 +184,29 @@ spec:
             # deployment/baked default, and forwarded onto the harness input line
             # so it takes effect.
             - name: SLACKBOTV2_CHANNEL_DEFAULTS
-              value: {{ .Values.slackbotv2.channelDefaults | toJson | quote }}
+              value: {{ $slackbot.channelDefaults | toJson | quote }}
 {{- end }}
-{{- if .Values.codex.customProviders }}
+{{- if $root.Values.codex.customProviders }}
             - name: CODEX_CUSTOM_PROVIDERS
-              value: {{ .Values.codex.customProviders | toJson | quote }}
+              value: {{ $root.Values.codex.customProviders | toJson | quote }}
 {{- end }}
 {{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" "CODEX_MODEL_REASONING_EFFORT" }}
-{{- if and (hasKey $.Values.sandbox.extraEnv $name) (not (hasKey $.Values.slackbotv2.extraEnv $name)) }}
+{{- if and (hasKey $root.Values.sandbox.extraEnv $name) (not (hasKey $slackbot.extraEnv $name)) }}
             # Mirror the deployer's harness default override (sandbox.extraEnv)
             # so the Slack Console-link line names the model/reasoning policy
             # sandboxes actually run. slackbotv2.extraEnv wins if it sets the
             # same variable.
             - name: {{ $name }}
-              value: {{ index $.Values.sandbox.extraEnv $name | toString | quote }}
+              value: {{ index $root.Values.sandbox.extraEnv $name | toString | quote }}
 {{- end }}
 {{- end }}
-{{- range $name, $value := .Values.slackbotv2.extraEnv }}
+{{- range $name, $value := $slackbot.extraEnv }}
             - name: {{ $name }}
               value: {{ $value | quote }}
 {{- end }}
           envFrom:
             - secretRef:
-                name: {{ include "centaur.secretEnvName" . }}
+                name: {{ include "centaur.secretEnvName" $root }}
           ports:
             - containerPort: 3001
               name: http
@@ -192,21 +221,23 @@ spec:
               port: 3001
             timeoutSeconds: 5
           securityContext:
-{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+{{ toYaml $root.Values.containerSecurityContext | nindent 12 }}
           resources:
-{{ toYaml .Values.slackbotv2.resources | nindent 12 }}
+{{ toYaml $slackbot.resources | nindent 12 }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}
+  name: {{ include "centaur.componentName" (dict "root" $root "component" $component) }}
   labels:
-{{ include "centaur.componentLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
+{{ include "centaur.componentLabels" (dict "root" $root "component" $component) | nindent 4 }}
 spec:
   selector:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" $root "component" $component) | nindent 4 }}
   ports:
     - name: http
       port: 3001
       targetPort: 3001
+---
+{{- end }}
 {{- end }}
