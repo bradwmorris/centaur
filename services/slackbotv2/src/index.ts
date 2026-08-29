@@ -1248,7 +1248,7 @@ async function syncThreadMessageToSession(
           chatObjectId: contextChatObjectId,
           principalId: `slack:${slackUserIdForMessage(serializedMessage) ?? 'unknown'}`,
           query: slackMessagePromptText(serializedMessage),
-          threadKey: thread.id
+          threadKey: canonicalSlackContextThreadKey(serializedMessage, thread.id)
         },
         input.options.fetch
       )
@@ -1815,6 +1815,18 @@ async function resolveSlackContextChatId(
     })
     return undefined
   }
+}
+
+function canonicalSlackContextThreadKey(
+  message: SlackbotV2ApiMessage,
+  threadId: string
+): string {
+  const parts = threadId.split(':')
+  if (parts.length === 4) return threadId
+  if (parts.length === 3 && parts[0] === 'slack' && message.teamId) {
+    return `slack:${message.teamId}:${parts[1]}:${parts[2]}`
+  }
+  return threadId
 }
 
 function evalUsageCollector(

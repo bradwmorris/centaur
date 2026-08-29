@@ -217,7 +217,9 @@ describe('slackbotv2', () => {
       '00000000-0000-4000-8000-000000000123'
     )
     expect(contextRequest?.headers.get('x-centaur-principal-id')).toBe(`slack:${USER_ID}`)
-    expect(contextRequest?.headers.get('x-centaur-thread-key')).toBe(threadKey(mention.ts))
+    expect(contextRequest?.headers.get('x-centaur-thread-key')).toBe(
+      `slack:${TEAM_ID}:${CHANNEL_ID}:${mention.ts}`
+    )
     expect(codexApi.executes).toHaveLength(1)
     const executionInput = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!) as {
       message?: { content?: Array<{ text?: string }> }
