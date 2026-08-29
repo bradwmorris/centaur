@@ -558,6 +558,20 @@ apiRs:
 # (:8080) and streams responses back. Listens on :3001.
 slackbotv2:
   enabled: true
+  # Leave empty for the legacy singleton deployment. When non-empty, render one
+  # isolated Deployment and Service per Slack app. Each instance inherits this
+  # block and overrides only the fields it sets.
+  instances: []
+  # - id: editor
+  #   personaId: editor
+  #   userName: enyu-editor
+  #   secretName: centaur-enyu-editor-slack
+  #   botTokenSecretKey: SLACK_BOT_TOKEN
+  #   signingSecretSecretKey: SLACK_SIGNING_SECRET
+  # - id: researcher
+  #   personaId: researcher
+  #   userName: enyu-researcher
+  #   secretName: centaur-enyu-researcher-slack
   replicaCount: 1
   image:
     repository: centaur-slackbotv2

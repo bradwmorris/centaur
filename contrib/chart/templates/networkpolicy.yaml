@@ -64,7 +64,7 @@ spec:
 {{- if .Values.slackbotv2.enabled }}
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 14 }}
+              centaur.ai/slackbotv2: "true"
 {{- end }}
 {{- if .Values.linearbot.enabled }}
         - podSelector:
@@ -162,7 +162,7 @@ spec:
 {{- if .Values.slackbotv2.enabled }}
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 14 }}
+              centaur.ai/slackbotv2: "true"
 {{- end }}
 {{- if .Values.linearbot.enabled }}
         - podSelector:
@@ -362,7 +362,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 6 }}
+      centaur.ai/slackbotv2: "true"
   policyTypes:
     - Ingress
     - Egress

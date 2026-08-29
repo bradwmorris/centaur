@@ -74,6 +74,7 @@ export type SlackbotV2AppendMessagesRequest = {
 export type SlackbotV2CreateSessionRequest = {
   harness_type: string
   metadata: JsonObject
+  persona_id?: string
   /** 'restart': switch the thread to harness_type if it's pinned to another harness. */
   on_harness_conflict?: 'reject' | 'restart'
 }
@@ -191,6 +192,8 @@ export type SlackbotV2Options = {
   handoffRetryDelaysMs?: readonly number[]
   /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
   idleTimeoutMs?: number
+  /** Stable deployment identity used to isolate sessions, state, permissions, and metrics. */
+  instanceId?: string
   /** Optional post-response sink for normalized, idempotent Slack thread snapshots. */
   interactionSink?: {
     url: string
@@ -218,6 +221,8 @@ export type SlackbotV2Options = {
   logger?: Logger
   maxDurationMs?: number
   postgresUrl?: string
+  /** Persona selected for every session created by this Slackbot instance. */
+  personaId?: string
   recoverRenderObligationsOnStart?: boolean
   /** Maximum Slack message age eligible for startup render recovery. */
   renderRecoveryMaxObligationAgeMs?: number
@@ -278,6 +283,7 @@ export type SlackbotV2RenderObligation = {
   afterEventId: number
   executionId: string
   message: SlackbotV2ApiMessage
+  sessionThreadId?: string
 }
 
 export type SlackbotV2MessageMode = 'append' | 'execute'

@@ -28,6 +28,14 @@
 {{- $publicToolSources = append $publicToolSources $toolSource -}}
 {{- end -}}
 {{- end -}}
+{{- with (get $source "personasSubdir") -}}
+{{- $personaSource := dict "repo" $repo "subdir" . "visibility" $visibility -}}
+{{- with (get $source "ref") }}{{- $_ := set $personaSource "ref" . -}}{{- end -}}
+{{- $toolSources = append $toolSources $personaSource -}}
+{{- if eq $visibility "public" -}}
+{{- $publicToolSources = append $publicToolSources $personaSource -}}
+{{- end -}}
+{{- end -}}
 {{- with (get $source "workflowsSubdir") -}}
 {{- $apiWorkflowDirList = append $apiWorkflowDirList (printf "%s/%s/%s" $.Values.repoCache.hostPath $repo .) -}}
 {{- $sandboxWorkflowDirList = append $sandboxWorkflowDirList (printf "/home/agent/github/%s/%s" $repo .) -}}

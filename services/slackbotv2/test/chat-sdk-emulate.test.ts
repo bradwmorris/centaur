@@ -152,6 +152,37 @@ describe('slackbotv2', () => {
     expect(codexApi.executes[0]?.threadKey).toBe(threadKey(parent.ts))
   })
 
+  it('isolates a named Slackbot session and binds its persona', async () => {
+    bot = createTestBot({ instanceId: 'editor', personaId: 'editor' })
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> edit this brief`)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack/editor',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-editor-instance',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> edit this brief`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.creates).toHaveLength(1)
+    expect(codexApi.creates[0]?.threadKey).toBe(
+      `slack:${TEAM_ID}:bot-editor:${CHANNEL_ID}:${mention.ts}`
+    )
+    expect(codexApi.creates[0]?.body.persona_id).toBe('editor')
+    expect(codexApi.creates[0]?.body.metadata.slackbot_instance_id).toBe('editor')
+  })
+
   it('injects read-only shared context before the Slack execution prompt', async () => {
     let contextRequest: Request | undefined
     bot = createTestBot({
