@@ -1226,12 +1226,26 @@ async function syncThreadMessageToSession(
   const messagesToAppend = candidateMessages.filter(item => !messageIds.has(item.id))
 
   let sharedContextPreamble: string | undefined
+  let contextChatObjectId = state.contextChatObjectId
+  if (shouldStartExecution && input.options.contextBuilder && input.options.interactionSink) {
+    const resolvedChatObjectId = await resolveSlackContextChatId(
+      thread,
+      input.options,
+      serializedMessage,
+      trace
+    )
+    contextChatObjectId = resolvedChatObjectId ?? contextChatObjectId
+  }
   if (shouldStartExecution && input.options.contextBuilder) {
     const contextBuilderStartedAtMs = nowMs()
     try {
+      if (!contextChatObjectId) {
+        throw new Error('Centaur Context chat identity is unavailable')
+      }
       const sharedContext = await fetchSharedContext(
         input.options.contextBuilder,
         {
+          chatObjectId: contextChatObjectId,
           principalId: `slack:${slackUserIdForMessage(serializedMessage) ?? 'unknown'}`,
           query: slackMessagePromptText(serializedMessage),
           threadKey: thread.id
@@ -1758,11 +1772,11 @@ async function publishSlackInteractionSnapshot(
   if (!options.interactionSink) return
   const startedAtMs = nowMs()
   try {
-    const outcome = await withSlackApiTimeout(options, 'publish Slack interaction snapshot', () =>
+    const result = await withSlackApiTimeout(options, 'publish Slack interaction snapshot', () =>
       sendSlackInteractionSnapshot(options, message, agentUsage)
     )
     traceLog(options, 'slackbotv2_interaction_snapshot_complete', trace, {
-      outcome,
+      outcome: result.outcome,
       phase_ms: elapsedMs(startedAtMs)
     })
   } catch (error) {
@@ -1770,6 +1784,36 @@ async function publishSlackInteractionSnapshot(
       error: errorMessage(error),
       phase_ms: elapsedMs(startedAtMs)
     })
+  }
+}
+
+async function resolveSlackContextChatId(
+  thread: Thread<SlackbotV2ThreadState>,
+  options: SlackbotV2Options,
+  message: SlackbotV2ApiMessage,
+  trace: SlackbotV2Trace
+): Promise<string | undefined> {
+  const startedAtMs = nowMs()
+  try {
+    const result = await withSlackApiTimeout(options, 'resolve Slack context chat', () =>
+      sendSlackInteractionSnapshot(options, message, [], { interactionFinished: false })
+    )
+    if (!result.chatObjectId) return undefined
+    const latest = (await thread.state) ?? {}
+    if (latest.contextChatObjectId !== result.chatObjectId) {
+      await thread.setState({ contextChatObjectId: result.chatObjectId })
+    }
+    traceLog(options, 'slackbotv2_context_chat_resolved', trace, {
+      outcome: result.outcome,
+      phase_ms: elapsedMs(startedAtMs)
+    })
+    return result.chatObjectId
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_context_chat_resolution_failed', trace, {
+      error: errorMessage(error),
+      phase_ms: elapsedMs(startedAtMs)
+    })
+    return undefined
   }
 }
 

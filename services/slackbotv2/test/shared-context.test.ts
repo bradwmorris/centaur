@@ -36,6 +36,7 @@ describe('Slack shared context builder', () => {
         url: 'http://context.test/api/v1/context'
       },
       {
+        chatObjectId: '00000000-0000-4000-8000-000000000123',
         principalId: 'slack:U1',
         query: '  what   happened?  ',
         threadKey: 'slack:C1:1700000000.000100'
@@ -43,7 +44,9 @@ describe('Slack shared context builder', () => {
       fetchFn
     )
 
-    expect(request?.url).toBe('http://context.test/api/v1/context?q=what+happened%3F&limit=10')
+    expect(request?.url).toBe(
+      'http://context.test/api/v1/context?q=what+happened%3F&chat_object_id=00000000-0000-4000-8000-000000000123&limit=10'
+    )
     expect(request?.headers.get('authorization')).toBe('Bearer context-token')
     expect(request?.headers.get('x-centaur-principal-id')).toBe('slack:U1')
     expect(request?.headers.get('x-centaur-thread-key')).toBe(
@@ -65,7 +68,12 @@ describe('Slack shared context builder', () => {
       Response.json({ data: { objects: [] } })
     const result = await fetchSharedContext(
       { token: 'token', url: 'http://context.test/api/v1/context' },
-      { principalId: 'slack:U1', query: 'unmatched', threadKey: 'thread-1' },
+      {
+        chatObjectId: '00000000-0000-4000-8000-000000000123',
+        principalId: 'slack:U1',
+        query: 'unmatched',
+        threadKey: 'thread-1'
+      },
       fetchFn
     )
     expect(result).toEqual({ objectCount: 0, truncated: false })
@@ -82,7 +90,12 @@ describe('Slack shared context builder', () => {
       })
     const result = await fetchSharedContext(
       { limit: 50, token: 'token', url: 'http://context.test/api/v1/context' },
-      { principalId: 'slack:U1', query: 'memory', threadKey: 'thread-1' },
+      {
+        chatObjectId: '00000000-0000-4000-8000-000000000123',
+        principalId: 'slack:U1',
+        query: 'memory',
+        threadKey: 'thread-1'
+      },
       fetchFn
     )
     expect(result.objectCount).toBeLessThanOrEqual(10)
@@ -95,7 +108,12 @@ describe('Slack shared context builder', () => {
     await expect(
       fetchSharedContext(
         { token: 'token', url: 'http://context.test/api/v1/context' },
-        { principalId: 'slack:U1', query: 'anything', threadKey: 'thread-1' },
+        {
+          chatObjectId: '00000000-0000-4000-8000-000000000123',
+          principalId: 'slack:U1',
+          query: 'anything',
+          threadKey: 'thread-1'
+        },
         fetchFn
       )
     ).rejects.toThrow('invalid shape')

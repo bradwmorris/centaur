@@ -155,6 +155,10 @@ describe('slackbotv2', () => {
   it('injects read-only shared context before the Slack execution prompt', async () => {
     let contextRequest: Request | undefined
     bot = createTestBot({
+      interactionSink: {
+        token: 'interaction-sink-token',
+        url: 'http://context.test/api/v1/ingest/slack/interactions'
+      },
       contextBuilder: {
         limit: 10,
         timeoutMs: 500,
@@ -163,6 +167,11 @@ describe('slackbotv2', () => {
       },
       fetch: async (input, init) => {
         const request = new Request(input, init)
+        if (request.url.includes('/ingest/slack/interactions')) {
+          return Response.json({
+            data: { chat_object_id: '00000000-0000-4000-8000-000000000123' }
+          }, { status: 202 })
+        }
         if (request.url.startsWith('http://context.test/')) {
           contextRequest = request
           return Response.json({
@@ -204,6 +213,9 @@ describe('slackbotv2', () => {
     expect(response.status).toBe(200)
     await Promise.all(waits)
     expect(contextRequest?.headers.get('authorization')).toBe('Bearer shared-context-token')
+    expect(new URL(contextRequest!.url).searchParams.get('chat_object_id')).toBe(
+      '00000000-0000-4000-8000-000000000123'
+    )
     expect(contextRequest?.headers.get('x-centaur-principal-id')).toBe(`slack:${USER_ID}`)
     expect(contextRequest?.headers.get('x-centaur-thread-key')).toBe(threadKey(mention.ts))
     expect(codexApi.executes).toHaveLength(1)
@@ -220,6 +232,10 @@ describe('slackbotv2', () => {
   it('still starts the Slack execution when shared context is unavailable', async () => {
     const logs: CapturedLog[] = []
     bot = createTestBot({
+      interactionSink: {
+        token: 'interaction-sink-token',
+        url: 'http://context.test/api/v1/ingest/slack/interactions'
+      },
       contextBuilder: {
         timeoutMs: 500,
         token: 'shared-context-token',
@@ -227,6 +243,11 @@ describe('slackbotv2', () => {
       },
       fetch: async (input, init) => {
         const request = new Request(input, init)
+        if (request.url.includes('/ingest/slack/interactions')) {
+          return Response.json({
+            data: { chat_object_id: '00000000-0000-4000-8000-000000000123' }
+          }, { status: 202 })
+        }
         if (request.url.startsWith('http://context.test/')) {
           return Response.json({ error: 'unavailable' }, { status: 503 })
         }
