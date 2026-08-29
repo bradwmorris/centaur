@@ -1,6 +1,7 @@
 import { fetchSlackThreadReplies } from '@chat-adapter/slack/api'
 import { renderSlackDisplayText } from './slack-display-text'
 import type { JsonObject, SlackbotV2ApiMessage, SlackbotV2Options } from './types'
+import type { EvalUsageAttempt } from './eval-usage'
 import { stringValue } from './utils'
 
 export type SlackInteractionSinkMessage = {
@@ -21,6 +22,7 @@ export type SlackInteractionSinkEnvelope = {
   surface_kind: 'channel' | 'dm'
   messages: SlackInteractionSinkMessage[]
   interaction_finished: boolean
+  agent_usage?: EvalUsageAttempt[]
 }
 
 export function isExplicitInteractionFinish(text: string): boolean {
@@ -67,7 +69,8 @@ export function buildSlackInteractionEnvelope(input: {
 
 export async function sendSlackInteractionSnapshot(
   options: SlackbotV2Options,
-  currentMessage: SlackbotV2ApiMessage
+  currentMessage: SlackbotV2ApiMessage,
+  agentUsage: EvalUsageAttempt[] = []
 ): Promise<'disabled' | 'skipped' | 'sent'> {
   const sink = options.interactionSink
   if (!sink) return 'disabled'
@@ -114,7 +117,7 @@ export async function sendSlackInteractionSnapshot(
         authorization: `Bearer ${sink.token}`,
         'content-type': 'application/json'
       },
-      body: JSON.stringify(envelope),
+      body: JSON.stringify({ ...envelope, agent_usage: agentUsage }),
       signal: controller.signal
     })
     if (!response.ok) {

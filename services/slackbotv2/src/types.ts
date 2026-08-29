@@ -196,6 +196,17 @@ export type SlackbotV2Options = {
     url: string
     token: string
     timeoutMs?: number
+    usage?: {
+      provider: string
+      authMode: 'chatgpt_subscription' | 'api_key' | 'not_applicable' | 'unknown'
+      billingMode:
+        | 'subscription_allowance'
+        | 'chatgpt_credits'
+        | 'metered_api'
+        | 'not_applicable'
+        | 'unknown'
+      upstreamService: string
+    }
   }
   /** Optional read-only context packet fetched immediately before an execution. */
   contextBuilder?: {

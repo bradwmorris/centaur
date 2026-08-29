@@ -214,8 +214,37 @@ function interactionSinkEnv(): SlackbotV2Options['interactionSink'] {
   return {
     url,
     token,
-    timeoutMs: optionalNumberEnv('SLACKBOTV2_INTERACTION_SINK_TIMEOUT_MS')
+    timeoutMs: optionalNumberEnv('SLACKBOTV2_INTERACTION_SINK_TIMEOUT_MS'),
+    usage: {
+      provider: stringEnv('SLACKBOTV2_INTERACTION_SINK_USAGE_PROVIDER', 'unknown'),
+      authMode: enumEnv(
+        'SLACKBOTV2_INTERACTION_SINK_USAGE_AUTH_MODE',
+        ['chatgpt_subscription', 'api_key', 'not_applicable', 'unknown'] as const,
+        'unknown'
+      ),
+      billingMode: enumEnv(
+        'SLACKBOTV2_INTERACTION_SINK_USAGE_BILLING_MODE',
+        ['subscription_allowance', 'chatgpt_credits', 'metered_api', 'not_applicable', 'unknown'] as const,
+        'unknown'
+      ),
+      upstreamService: stringEnv(
+        'SLACKBOTV2_INTERACTION_SINK_USAGE_UPSTREAM_SERVICE',
+        'unknown'
+      )
+    }
   }
+}
+
+function enumEnv<const T extends readonly string[]>(
+  name: string,
+  values: T,
+  fallback: T[number]
+): T[number] {
+  const value = optionalEnv(name) ?? fallback
+  if (!values.includes(value)) {
+    throw new Error(`${name} must be one of ${values.join(', ')}`)
+  }
+  return value
 }
 
 function contextBuilderEnv(): SlackbotV2Options['contextBuilder'] {

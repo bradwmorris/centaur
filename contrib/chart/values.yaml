@@ -591,6 +591,13 @@ slackbotv2:
     timeoutMs: 5000
     secretName: ""
     secretKey: CHAT_INGEST_API_TOKEN
+    # Explicit runtime facts for normalized model-usage traces. Keep unknown
+    # until the selected harness authentication path is verified.
+    usage:
+      provider: unknown
+      authMode: unknown
+      billingMode: unknown
+      upstreamService: unknown
   # Optional read-only context packet fetched immediately before each Slack
   # execution. Failure is non-blocking so the agent still responds.
   contextBuilder:
