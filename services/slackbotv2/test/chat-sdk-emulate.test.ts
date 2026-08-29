@@ -211,7 +211,7 @@ describe('slackbotv2', () => {
       message?: { content?: Array<{ text?: string }> }
     }
     const content = executionInput.message?.content ?? []
-    expect(contentTextWithHeading(content as Array<{ text?: string; type: string }>, '# Centaur OS Shared Context')).toContain(
+    expect(contentTextWithHeading(content as Array<{ text?: string; type: string }>, '# Centaur Context')).toContain(
       'Review launch checklist'
     )
     expect(content.at(-1)?.text).toContain('what is ready for review?')
@@ -258,7 +258,7 @@ describe('slackbotv2', () => {
     expect(codexApi.executes).toHaveLength(1)
     expect(hasLog(logs, 'slackbotv2_shared_context_degraded')).toBe(true)
     expect(JSON.stringify(codexApi.executes[0]!.body)).not.toContain(
-      '# Centaur OS Shared Context'
+      '# Centaur Context'
     )
   })
 
