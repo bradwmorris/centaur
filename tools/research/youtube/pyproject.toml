@@ -26,6 +26,7 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
+hosts = ["www.youtube.com"]
 secrets = [
     {type = "http", name = "YOUTUBE_API_KEY", mode = "inject", inject_query_param = "key", hosts = ["www.googleapis.com"]},
 ]
