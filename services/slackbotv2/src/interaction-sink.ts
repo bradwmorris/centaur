@@ -10,6 +10,13 @@ export type SlackInteractionSinkMessage = {
     provider_user_id: string
     display_name: string
     user_kind: 'human' | 'agent'
+    avatar_url?: string
+    avatar_asset?: {
+      sha256: string
+      filename: string
+      provenance: JsonObject
+    }
+    profile_refreshed_at?: string
   }
   content: string
   source_created_at: string
@@ -29,6 +36,20 @@ export type SlackInteractionSnapshotResult = {
   chatObjectId?: string
   outcome: 'disabled' | 'skipped' | 'sent'
 }
+
+type SlackProfile = {
+  displayName?: string
+  avatarUrl?: string
+  refreshedAt: string
+}
+
+type CachedSlackProfile = {
+  profile: SlackProfile
+  expiresAt: number
+}
+
+const profileCaches = new WeakMap<SlackbotV2Options, Map<string, CachedSlackProfile>>()
+const MAX_PROFILE_LOOKUPS_PER_SNAPSHOT = 500
 
 export function isExplicitInteractionFinish(text: string): boolean {
   const mentionless = text
@@ -112,6 +133,7 @@ export async function sendSlackInteractionSnapshot(
     userName: options.userName
   })
   if (!envelope) return { outcome: 'skipped' }
+  await enrichSlackIdentities(options, envelope)
   if (overrides.interactionFinished !== undefined) {
     envelope.interaction_finished = overrides.interactionFinished
   }
@@ -136,6 +158,98 @@ export async function sendSlackInteractionSnapshot(
     return { chatObjectId: parseChatObjectId(payload), outcome: 'sent' }
   } finally {
     clearTimeout(timeout)
+  }
+}
+
+async function enrichSlackIdentities(
+  options: SlackbotV2Options,
+  envelope: SlackInteractionSinkEnvelope
+): Promise<void> {
+  const ids = [...new Set(envelope.messages.map(message => message.sender.provider_user_id))]
+    .slice(0, MAX_PROFILE_LOOKUPS_PER_SNAPSHOT)
+  const profiles = new Map<string, SlackProfile>()
+  if (options.interactionSink?.profileTtlMs !== undefined) {
+    await Promise.all(ids.map(async id => {
+      const profile = await resolveSlackProfile(options, id)
+      if (profile) profiles.set(id, profile)
+    }))
+  }
+  for (const message of envelope.messages) {
+    const sender = message.sender
+    const profile = profiles.get(sender.provider_user_id)
+    if (profile?.displayName) sender.display_name = profile.displayName
+    if (profile?.avatarUrl) sender.avatar_url = profile.avatarUrl
+    if (profile) sender.profile_refreshed_at = profile.refreshedAt
+    const override = sender.provider_user_id === options.botUserId
+      ? options.interactionSink?.botIdentity
+      : options.interactionSink?.identityOverrides?.[sender.provider_user_id]
+    if (override?.displayName) sender.display_name = override.displayName
+    if (override?.avatarAsset) {
+      sender.avatar_asset = {
+        sha256: override.avatarAsset.sha256,
+        filename: override.avatarAsset.filename,
+        provenance: override.avatarAsset.provenance ?? {}
+      }
+    }
+  }
+}
+
+async function resolveSlackProfile(
+  options: SlackbotV2Options,
+  userId: string
+): Promise<SlackProfile | undefined> {
+  let cache = profileCaches.get(options)
+  if (!cache) {
+    cache = new Map()
+    profileCaches.set(options, cache)
+  }
+  const now = Date.now()
+  const cached = cache.get(userId)
+  if (cached && cached.expiresAt > now) return cached.profile
+  try {
+    const url = new URL('users.info', options.slackApiUrl ?? 'https://slack.com/api/')
+    url.searchParams.set('user', userId)
+    const controller = new AbortController()
+    const timeout = setTimeout(
+      () => controller.abort(),
+      options.slackApiTimeoutMs ?? 5_000
+    )
+    let response: Response
+    try {
+      response = await fetch(url, {
+        headers: { authorization: `Bearer ${options.botToken}` },
+        signal: controller.signal
+      })
+    } finally {
+      clearTimeout(timeout)
+    }
+    if (!response.ok) throw new Error(`users.info returned HTTP ${response.status}`)
+    const payload = asRecord(await response.json())
+    if (payload.ok !== true) throw new Error('users.info returned ok=false')
+    const user = asRecord(payload.user)
+    const rawProfile = asRecord(user.profile)
+    const profile: SlackProfile = {
+      displayName:
+        stringValue(rawProfile.display_name_normalized)
+        ?? stringValue(rawProfile.display_name)
+        ?? stringValue(rawProfile.real_name_normalized)
+        ?? stringValue(rawProfile.real_name)
+        ?? stringValue(user.real_name)
+        ?? stringValue(user.name),
+      avatarUrl:
+        stringValue(rawProfile.image_512)
+        ?? stringValue(rawProfile.image_192)
+        ?? stringValue(rawProfile.image_72)
+        ?? stringValue(rawProfile.image_original),
+      refreshedAt: new Date(now).toISOString()
+    }
+    cache.set(userId, {
+      profile,
+      expiresAt: now + (options.interactionSink?.profileTtlMs ?? 6 * 60 * 60 * 1_000)
+    })
+    return profile
+  } catch {
+    return cached?.profile
   }
 }
 

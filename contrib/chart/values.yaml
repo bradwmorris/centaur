@@ -610,6 +610,11 @@ slackbotv2:
   interactionSink:
     url: ""
     timeoutMs: 5000
+    profileTtlMs: 21600000
+    # Optional canonical same-origin identity presentation. Instance entries
+    # may override botIdentity while identityOverrides are keyed by Slack user ID.
+    botIdentity: {}
+    identityOverrides: {}
     secretName: ""
     secretKey: CHAT_INGEST_API_TOKEN
     # Explicit runtime facts for normalized model-usage traces. Keep unknown

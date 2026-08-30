@@ -108,7 +108,19 @@ describe('Slack interaction sink envelope', () => {
     const slack = Bun.serve({
       port: 0,
       fetch(request) {
-        expect(new URL(request.url).pathname).toBe('/api/conversations.replies')
+        const url = new URL(request.url)
+        if (url.pathname === '/api/users.info') {
+          const user = url.searchParams.get('user')
+          return Response.json({
+            ok: true,
+            user: {
+              id: user,
+              name: user,
+              profile: { display_name: user, image_192: `https://avatar.test/${user}.png` }
+            }
+          })
+        }
+        expect(url.pathname).toBe('/api/conversations.replies')
         return Response.json({
           ok: true,
           messages: [
@@ -155,6 +167,103 @@ describe('Slack interaction sink envelope', () => {
       expect(sinkRequest.body?.messages).toHaveLength(2)
       expect(sinkRequest.body?.interaction_finished).toBe(true)
       expect(sinkRequest.body?.agent_usage).toEqual([])
+    } finally {
+      slack.stop(true)
+    }
+  })
+
+  test('caches profiles for six-hour-style TTLs and retains stale data on failure', async () => {
+    let profileCalls = 0
+    let failProfiles = false
+    const slack = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url)
+        if (url.pathname === '/api/users.info') {
+          profileCalls += 1
+          if (failProfiles) return Response.json({ ok: false }, { status: 503 })
+          const user = url.searchParams.get('user')!
+          return Response.json({
+            ok: true,
+            user: {
+              id: user,
+              profile: {
+                display_name: user === 'UHUMAN' ? 'Slack Brad' : 'Slack Bot',
+                image_192: `https://avatar.test/${user}.png`
+              }
+            }
+          })
+        }
+        return Response.json({
+          ok: true,
+          messages: [
+            { text: '<@UAGENT> finished', ts: '1780000001.000100', user: 'UHUMAN' },
+            {
+              bot_id: 'BAGENT',
+              bot_profile: { name: 'Old Bot', user_id: 'UAGENT' },
+              text: 'Recorded.',
+              ts: '1780000002.000100'
+            }
+          ],
+          response_metadata: { next_cursor: '' }
+        })
+      }
+    })
+    const bodies: SlackInteractionSinkEnvelope[] = []
+    try {
+      const options: SlackbotV2Options = {
+        apiUrl: 'http://session.test',
+        botToken: 'xoxb-test',
+        botUserId: 'UAGENT',
+        signingSecret: 'test-signing-secret',
+        slackApiUrl: `http://127.0.0.1:${slack.port}/api/`,
+        interactionSink: {
+          url: 'http://context.test/ingest',
+          token: 'i'.repeat(32),
+          profileTtlMs: 2,
+          botIdentity: {
+            displayName: 'Ed (enyu editor)',
+            avatarAsset: { sha256: 'a'.repeat(64), filename: 'ed.png' }
+          },
+          identityOverrides: {
+            UHUMAN: {
+              displayName: 'Brad',
+              avatarAsset: { sha256: 'b'.repeat(64), filename: 'brad.jpg' }
+            }
+          }
+        },
+        fetch: async (_input, init) => {
+          bodies.push(JSON.parse(String(init?.body)) as SlackInteractionSinkEnvelope)
+          return Response.json(
+            { data: { chat_object_id: '00000000-0000-4000-8000-000000000123' } },
+            { status: 202 }
+          )
+        }
+      }
+      await sendSlackInteractionSnapshot(options, currentMessage())
+      expect(profileCalls).toBe(2)
+      await sendSlackInteractionSnapshot(options, currentMessage())
+      expect(profileCalls).toBe(2)
+      await Bun.sleep(5)
+      failProfiles = true
+      await sendSlackInteractionSnapshot(options, currentMessage())
+      expect(profileCalls).toBe(4)
+      await sendSlackInteractionSnapshot(options, currentMessage())
+      expect(profileCalls).toBe(6)
+
+      const latest = bodies.at(-1)!
+      const human = latest.messages.find(message => message.sender.provider_user_id === 'UHUMAN')!
+      const bot = latest.messages.find(message => message.sender.provider_user_id === 'UAGENT')!
+      expect(human.sender).toMatchObject({
+        display_name: 'Brad',
+        avatar_url: 'https://avatar.test/UHUMAN.png',
+        avatar_asset: { sha256: 'b'.repeat(64), filename: 'brad.jpg' }
+      })
+      expect(bot.sender).toMatchObject({
+        display_name: 'Ed (enyu editor)',
+        avatar_url: 'https://avatar.test/UAGENT.png',
+        avatar_asset: { sha256: 'a'.repeat(64), filename: 'ed.png' }
+      })
     } finally {
       slack.stop(true)
     }

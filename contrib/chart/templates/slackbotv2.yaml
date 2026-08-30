@@ -148,6 +148,16 @@ spec:
               value: {{ $slackbot.interactionSink.url | quote }}
             - name: SLACKBOTV2_INTERACTION_SINK_TIMEOUT_MS
               value: {{ $slackbot.interactionSink.timeoutMs | quote }}
+            - name: SLACKBOTV2_INTERACTION_SINK_PROFILE_TTL_MS
+              value: {{ $slackbot.interactionSink.profileTtlMs | quote }}
+{{- if $slackbot.interactionSink.botIdentity }}
+            - name: SLACKBOTV2_INTERACTION_SINK_BOT_IDENTITY
+              value: {{ $slackbot.interactionSink.botIdentity | toJson | quote }}
+{{- end }}
+{{- if $slackbot.interactionSink.identityOverrides }}
+            - name: SLACKBOTV2_INTERACTION_SINK_IDENTITY_OVERRIDES
+              value: {{ $slackbot.interactionSink.identityOverrides | toJson | quote }}
+{{- end }}
             - name: SLACKBOTV2_INTERACTION_SINK_USAGE_PROVIDER
               value: {{ $slackbot.interactionSink.usage.provider | quote }}
             - name: SLACKBOTV2_INTERACTION_SINK_USAGE_AUTH_MODE
@@ -239,5 +249,5 @@ spec:
       port: 3001
       targetPort: 3001
 ---
-{{- end }}
+{{ end }}
 {{- end }}

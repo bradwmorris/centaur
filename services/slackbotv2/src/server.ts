@@ -222,6 +222,11 @@ function interactionSinkEnv(): SlackbotV2Options['interactionSink'] {
     url,
     token,
     timeoutMs: optionalNumberEnv('SLACKBOTV2_INTERACTION_SINK_TIMEOUT_MS'),
+    profileTtlMs: optionalNumberEnv('SLACKBOTV2_INTERACTION_SINK_PROFILE_TTL_MS'),
+    botIdentity: identityOverrideEnv('SLACKBOTV2_INTERACTION_SINK_BOT_IDENTITY'),
+    identityOverrides: identityOverridesEnv(
+      'SLACKBOTV2_INTERACTION_SINK_IDENTITY_OVERRIDES'
+    ),
     usage: {
       provider: stringEnv('SLACKBOTV2_INTERACTION_SINK_USAGE_PROVIDER', 'unknown'),
       authMode: enumEnv(
@@ -238,6 +243,60 @@ function interactionSinkEnv(): SlackbotV2Options['interactionSink'] {
         'SLACKBOTV2_INTERACTION_SINK_USAGE_UPSTREAM_SERVICE',
         'unknown'
       )
+    }
+  }
+}
+
+function identityOverrideEnv(
+  name: string
+): NonNullable<SlackbotV2Options['interactionSink']>['botIdentity'] {
+  const value = optionalEnv(name)
+  if (!value) return undefined
+  const parsed: unknown = JSON.parse(value)
+  validateIdentityOverride(name, parsed)
+  return parsed as NonNullable<SlackbotV2Options['interactionSink']>['botIdentity']
+}
+
+function identityOverridesEnv(
+  name: string
+): NonNullable<SlackbotV2Options['interactionSink']>['identityOverrides'] {
+  const value = optionalEnv(name)
+  if (!value) return undefined
+  const parsed: unknown = JSON.parse(value)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${name} must be a JSON object keyed by Slack user ID`)
+  }
+  for (const [userId, override] of Object.entries(parsed)) {
+    if (!userId.trim()) throw new Error(`${name} contains an empty Slack user ID`)
+    validateIdentityOverride(`${name}.${userId}`, override)
+  }
+  return parsed as NonNullable<SlackbotV2Options['interactionSink']>['identityOverrides']
+}
+
+function validateIdentityOverride(name: string, value: unknown): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${name} must be a JSON object`)
+  }
+  const override = value as Record<string, unknown>
+  if (
+    override.displayName !== undefined
+    && (typeof override.displayName !== 'string' || !override.displayName.trim())
+  ) {
+    throw new Error(`${name}.displayName must be a non-empty string`)
+  }
+  if (override.avatarAsset !== undefined) {
+    const asset = override.avatarAsset as Record<string, unknown>
+    if (
+      !asset
+      || typeof asset !== 'object'
+      || Array.isArray(asset)
+      || typeof asset.sha256 !== 'string'
+      || !/^[0-9a-f]{64}$/.test(asset.sha256)
+      || typeof asset.filename !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(asset.filename)
+      || asset.filename.includes('..')
+    ) {
+      throw new Error(`${name}.avatarAsset must contain a safe lowercase SHA-256 and filename`)
     }
   }
 }
