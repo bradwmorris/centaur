@@ -329,7 +329,7 @@ sandbox:
   #                  placeholder against api.openai.com / api.anthropic.com).
   #   access_token — codex uses a ChatGPT token against chatgpt.com / claude a
   #                  subscription token (proxy injects the brokered credential).
-  codexAuthMode: api_key
+  codexAuthMode: access_token
   claudeCodeAuthMode: api_key
   # The deployment's default harness: codex | amp | claudecode. Decides what
   # warm sandboxes boot (SESSION_SANDBOX_HARNESS) and which harness auth
@@ -451,6 +451,13 @@ apiRs:
   # Set false when multiple Centaur instances share one console/1Password
   # Connect control plane and infra secrets are managed out of band.
   syncInfraSecrets: true
+  # Private, authenticated Context Curator inference through Codex and the
+  # Console-managed ChatGPT subscription identity. Requires
+  # sandbox.codexAuthMode=access_token and CENTAUR_CONTEXT_API_KEY in the
+  # infra Secret. Direct API mode remains a Context-side rollback only.
+  curatorInference:
+    enabled: true
+    timeoutSecs: 180
   # Workflow enablement policy. Production defaults to all workflows enabled.
   # Set workflowEnableMode: allowlist in staging and list allowed workflow names
   # in workflowAllowedNames as a comma/whitespace-separated string.

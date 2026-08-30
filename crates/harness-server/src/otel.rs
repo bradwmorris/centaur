@@ -481,6 +481,35 @@ impl TurnTelemetry {
                 execution_id.to_owned(),
             ));
         }
+        if self.harness == HarnessKind::Codex {
+            let subscription = env::var("CODEX_AUTH_MODE").as_deref() == Ok("access_token");
+            attributes.extend([
+                KeyValue::new(
+                    "centaur.auth_mode",
+                    if subscription {
+                        "chatgpt_subscription"
+                    } else {
+                        "api_key"
+                    },
+                ),
+                KeyValue::new(
+                    "centaur.billing_basis",
+                    if subscription {
+                        "chatgpt_subscription"
+                    } else {
+                        "metered_api"
+                    },
+                ),
+                KeyValue::new(
+                    "server.address",
+                    if subscription {
+                        "chatgpt.com"
+                    } else {
+                        "api.openai.com"
+                    },
+                ),
+            ]);
+        }
         attributes
     }
 }

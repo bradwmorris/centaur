@@ -149,6 +149,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 // knob (its provider is fixed at thread start from session params).
                 provider: _,
                 reasoning: _,
+                output_schema: _,
                 trace_context,
             }) => {
                 if let Some(model) = model {
@@ -293,6 +294,7 @@ pub(crate) enum BlocksCommand {
         model: Option<String>,
         provider: Option<String>,
         reasoning: Option<String>,
+        output_schema: Option<Value>,
         trace_context: TraceContext,
     },
     Interrupt,
@@ -330,6 +332,8 @@ struct BlocksLine {
     provider: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
+    #[serde(default)]
+    output_schema: Option<Value>,
     #[serde(default)]
     thread_key: Option<String>,
     #[serde(default)]
@@ -481,6 +485,7 @@ pub(crate) fn parse_blocks_line_with_state(
                     .reasoning
                     .map(|reasoning| reasoning.trim().to_owned())
                     .filter(|reasoning| !reasoning.is_empty()),
+                output_schema: parsed.output_schema,
                 trace_context,
             })
         }
@@ -1713,6 +1718,16 @@ mod tests {
             panic!("expected user command");
         };
         assert_eq!(reasoning, None);
+    }
+
+    #[test]
+    fn parses_blocks_user_line_with_output_schema() {
+        let line = r#"{"type":"user","text":"hi","output_schema":{"type":"object"}}"#;
+        let BlocksCommand::User { output_schema, .. } = parse_blocks_line(line).expect("parses")
+        else {
+            panic!("expected user command");
+        };
+        assert_eq!(output_schema, Some(json!({"type": "object"})));
     }
 
     #[test]

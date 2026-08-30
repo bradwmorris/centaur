@@ -195,6 +195,7 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 model,
                 provider,
                 reasoning,
+                output_schema,
                 trace_context,
             }) => {
                 let traceparent = trace_context.effective_traceparent();
@@ -233,6 +234,7 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                         (model, model_provider),
                         provider,
                         reasoning,
+                        output_schema,
                         &active_turn_rx,
                         traceparent.as_deref(),
                         &mut telemetry,
@@ -321,6 +323,7 @@ fn run_codex_user_turn<W: Write>(
     model_and_provider: (Option<String>, String),
     requested_provider: Option<String>,
     reasoning: Option<String>,
+    output_schema: Option<Value>,
     active_turn_rx: &Receiver<CodexActiveTurnRequest>,
     traceparent: Option<&str>,
     telemetry: &mut TurnTelemetry,
@@ -374,6 +377,9 @@ fn run_codex_user_turn<W: Write>(
     if let Some(reasoning) = reasoning {
         params["effort"] = Value::String(reasoning);
     }
+    if let Some(output_schema) = output_schema {
+        params["outputSchema"] = output_schema;
+    }
 
     // codex occasionally fails a turn at job-registration time with a transient
     // "Engine not found" 404 (its backend engine is still warming up), reported
@@ -414,7 +420,7 @@ fn run_codex_user_turn<W: Write>(
                     // This is also the `CODEX_ENGINE_RETRY_MAX=0` fail-fast path.
                     for value in &withheld {
                         telemetry.observe_wire_value(value);
-                        write_value(stdout, value)?;
+                        write_forwarded_value(stdout, value)?;
                     }
                     return Ok(());
                 }
@@ -442,6 +448,16 @@ fn start_or_resume_thread<W: Write>(
     traceparent: Option<&str>,
 ) -> Result<StartedCodexThread> {
     let cwd = env::current_dir()?.display().to_string();
+    let sandbox = env::var("CODEX_THREAD_SANDBOX")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| {
+            matches!(
+                value.as_str(),
+                "read-only" | "workspace-write" | "danger-full-access"
+            )
+        })
+        .unwrap_or_else(|| "danger-full-access".to_owned());
     let resume = env::var("CODEX_CONTINUE_THREAD_ID")
         .or_else(|_| env::var("AMP_CONTINUE_THREAD_ID"))
         .unwrap_or_default();
@@ -452,7 +468,7 @@ fn start_or_resume_thread<W: Write>(
                 "cwd": cwd,
                 "approvalPolicy": "never",
                 "approvalsReviewer": "user",
-                "sandbox": "danger-full-access",
+                "sandbox": sandbox,
                 "modelProvider": model_provider,
             }),
         )
@@ -464,7 +480,7 @@ fn start_or_resume_thread<W: Write>(
                 "cwd": cwd,
                 "approvalPolicy": "never",
                 "approvalsReviewer": "user",
-                "sandbox": "danger-full-access",
+                "sandbox": sandbox,
                 "modelProvider": model_provider,
                 "excludeTurns": false,
             }),
@@ -526,12 +542,17 @@ impl CodexJsonRpcChild {
             .stderr
             .take()
             .ok_or(HarnessServerError::CodexStderrUnavailable)?;
+        let redact_input = env::var("CENTAUR_HARNESS_REDACT_INPUT_EVENTS")
+            .ok()
+            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
         thread::spawn(move || {
-            // Unlocked handle on purpose: this child lives across turns, so
-            // holding the StderrLock for the copy's lifetime would block every
-            // eprintln! in the server until the child exits.
-            let mut parent_stderr = io::stderr();
-            let _ = io::copy(&mut stderr, &mut parent_stderr);
+            if redact_input {
+                let _ = io::copy(&mut stderr, &mut io::sink());
+            } else {
+                // Unlocked handle on purpose: this child lives across turns,
+                // so holding StderrLock would block harness diagnostics.
+                let _ = io::copy(&mut stderr, &mut io::stderr());
+            }
         });
 
         let (stdout_tx, stdout_rx) = mpsc::channel();
@@ -609,7 +630,7 @@ impl CodexJsonRpcChild {
                 return Ok(value.get("result").cloned().unwrap_or(Value::Null));
             }
             if notification_method(&value).is_some() {
-                write_value(stdout, &value)?;
+                write_forwarded_value(stdout, &value)?;
             }
         }
     }
@@ -674,13 +695,13 @@ impl CodexJsonRpcChild {
                 GuardStep::Forward(values) => {
                     for value in &values {
                         telemetry.observe_wire_value(value);
-                        write_value(stdout, value)?;
+                        write_forwarded_value(stdout, value)?;
                     }
                 }
                 GuardStep::ForwardThenDone(values) => {
                     for value in &values {
                         telemetry.observe_wire_value(value);
-                        write_value(stdout, value)?;
+                        write_forwarded_value(stdout, value)?;
                     }
                     return Ok(TurnTermination::Done);
                 }
@@ -759,6 +780,24 @@ impl CodexJsonRpcChild {
             return Ok(Some(serde_json::from_str(trimmed)?));
         }
     }
+}
+
+fn write_forwarded_value<W: Write>(stdout: &mut W, value: &Value) -> Result<()> {
+    let redact_input = env::var("CENTAUR_HARNESS_REDACT_INPUT_EVENTS")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
+    let contains_user_message = value
+        .get("method")
+        .and_then(Value::as_str)
+        .is_some_and(|method| method.contains("userMessage") || method.contains("user_message"))
+        || value
+            .pointer("/params/item/type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| matches!(kind, "userMessage" | "user_message"));
+    if redact_input && contains_user_message {
+        return Ok(());
+    }
+    write_value(stdout, value)
 }
 
 impl Drop for CodexJsonRpcChild {

@@ -1,6 +1,7 @@
 mod api_jwt;
 mod auth;
 pub mod client;
+mod curator_inference;
 mod error;
 mod mcp;
 mod routes;
@@ -10,6 +11,9 @@ pub mod types;
 
 pub use auth::{ApiAuthConfig, ApiAuthConfigError};
 pub use centaur_session_runtime::{SandboxRuntime, SessionRuntime};
+pub use curator_inference::{
+    CURATOR_MODEL, CuratorInferenceRequest, CuratorInferenceResponse, CuratorInferenceRuntime,
+};
 pub use error::ApiError;
 pub use routes::{
     AppState, build_router_with_app_state, build_router_with_runtime,

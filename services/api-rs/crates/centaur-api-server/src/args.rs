@@ -12,8 +12,8 @@ use std::{
 use std::os::unix::fs::PermissionsExt;
 
 use centaur_api_server::{
-    DiscoveredToolProxyFragment, SandboxRuntime, ToolDiscoveryConfig, discover_persona_registry,
-    discover_tool_proxy_fragment,
+    CuratorInferenceRuntime, DiscoveredToolProxyFragment, SandboxRuntime, ToolDiscoveryConfig,
+    discover_persona_registry, discover_tool_proxy_fragment,
 };
 use centaur_iron_control::{
     IdentityInput, IronControlClient, IronControlError, PrincipalInput, RegisterError, RoleSpec,
@@ -27,7 +27,9 @@ use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
     OtlpEgressTarget, Toleration, ToolSource, ToolsConfig,
 };
-use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec};
+use centaur_sandbox_core::{
+    Mount, MountKind, RepoCacheAccess, ResourceRequirements, SandboxCapabilities, SandboxSpec,
+};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
@@ -108,6 +110,13 @@ impl Args {
             .await
     }
 
+    pub(crate) async fn curator_inference_runtime(
+        &self,
+        principal: &str,
+    ) -> Result<Option<CuratorInferenceRuntime>, ServerError> {
+        self.sandbox.curator_inference_runtime(principal).await
+    }
+
     pub(crate) fn activity_summary_config(&self) -> Option<ActivitySummaryConfig> {
         self.activity_summary.config()
     }
@@ -127,6 +136,7 @@ pub(crate) struct IronControlRuntime {
     pub(crate) warm_pool_bootstrap_principal: String,
     pub(crate) workflow_host_principal: String,
     pub(crate) workflow_principal_registrar: WorkflowPrincipalRegistrar,
+    pub(crate) curator_inference_principal: String,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -542,6 +552,20 @@ struct SandboxArgs {
     )]
     agent_image: Option<String>,
     #[arg(
+        long = "curator-inference-enabled",
+        env = "CURATOR_INFERENCE_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    curator_inference_enabled: bool,
+    #[arg(
+        long = "curator-inference-timeout-secs",
+        env = "CURATOR_INFERENCE_TIMEOUT_SECS",
+        default_value_t = 180,
+        value_parser = clap::value_parser!(u64).range(1..=600)
+    )]
+    curator_inference_timeout_secs: u64,
+    #[arg(
         long = "session-sandbox-image-pull-policy",
         alias = "kubernetes-agent-image-pull-policy",
         env = "SESSION_SANDBOX_IMAGE_PULL_POLICY"
@@ -773,12 +797,114 @@ impl SandboxArgs {
                 slack_email: None,
             })
             .await?;
+        let curator_inference = client
+            .upsert_principal(&PrincipalInput {
+                foreign_id: "context-curator-inference".to_owned(),
+                name: "Context Curator inference".to_owned(),
+                labels: BTreeMap::from([
+                    ("managed-by".to_owned(), "centaur".to_owned()),
+                    ("purpose".to_owned(), "context-curator-inference".to_owned()),
+                ]),
+                kind: None,
+                slack_user_id: None,
+                slack_channel_id: None,
+                slack_team_id: None,
+                slack_email: None,
+            })
+            .await?;
+        if self.curator_inference_enabled {
+            if !self.iron_control_sync_infra_secrets {
+                return Err(ServerError::UnsupportedConfig(
+                    "CURATOR_INFERENCE_ENABLED requires IRON_CONTROL_SYNC_INFRA_SECRETS=true"
+                        .to_owned(),
+                ));
+            }
+            let fragment = harness_auth_fragment("codex", "access_token")?
+                .expect("the baked-in Codex subscription fragment exists");
+            let role = RoleSpec {
+                foreign_id: "context-curator-inference".to_owned(),
+                name: "Context Curator inference".to_owned(),
+            };
+            let role_id = register_role_with_retry(
+                &client,
+                &role,
+                &fragment,
+                &self.iron_proxy.source_policy(),
+            )
+            .await?;
+            for existing in client.list_principal_roles(&curator_inference.id).await? {
+                if existing.id != role_id {
+                    client
+                        .unassign_role(&curator_inference.id, &existing.id)
+                        .await?;
+                }
+            }
+            client.assign_role(&curator_inference.id, &role_id).await?;
+        } else {
+            for existing in client.list_principal_roles(&curator_inference.id).await? {
+                client
+                    .unassign_role(&curator_inference.id, &existing.id)
+                    .await?;
+            }
+        }
         Ok(IronControlRuntime {
             registrar: SessionRegistrar::new(client.clone()),
             warm_pool_bootstrap_principal: bootstrap.id,
             workflow_host_principal: workflow_host.id,
             workflow_principal_registrar: WorkflowPrincipalRegistrar::new(client),
+            curator_inference_principal: curator_inference.id,
         })
+    }
+
+    async fn curator_inference_runtime(
+        &self,
+        principal: &str,
+    ) -> Result<Option<CuratorInferenceRuntime>, ServerError> {
+        if !self.curator_inference_enabled {
+            return Ok(None);
+        }
+        if !matches!(self.backend, SandboxBackendKind::AgentK8s) {
+            return Err(ServerError::UnsupportedConfig(
+                "CURATOR_INFERENCE_ENABLED requires SESSION_SANDBOX_BACKEND=agent-k8s".to_owned(),
+            ));
+        }
+        let configured_auth_mode =
+            clean_optional_value(env::var("CODEX_AUTH_MODE").ok().as_deref())
+                .unwrap_or_else(|| "api_key".to_owned());
+        if configured_auth_mode != "access_token" {
+            return Err(ServerError::UnsupportedConfig(
+                "CURATOR_INFERENCE_ENABLED requires CODEX_AUTH_MODE=access_token".to_owned(),
+            ));
+        }
+        let backend = AgentSandboxBackend::new(
+            self.kube_client().await?,
+            AgentSandboxConfig::try_from(self)?,
+        );
+        let fragment = harness_auth_fragment("codex", "access_token")?
+            .expect("the baked-in Codex subscription fragment exists");
+        let mut spec = SandboxSpec::new(self.agent_image.clone().unwrap_or_else(|| {
+            default_sandbox_image(SandboxWorkloadKind::CodexAppServer).to_owned()
+        }))
+        .label("centaur.ai/component", "context-curator-inference")
+        .label("centaur.ai/harness", "codex")
+        .args(["harness-server", "codex"])
+        .env("CODEX_AUTH_MODE", "access_token")
+        .env("CODEX_THREAD_SANDBOX", "read-only")
+        .env("CENTAUR_HARNESS_REDACT_INPUT_EVENTS", "true")
+        .env("CENTAUR_TOOLS_AUTO_RELOAD", "false")
+        .capabilities(SandboxCapabilities {
+            repo_cache: RepoCacheAccess::None,
+            observability_enabled: true,
+        })
+        .iron_control_principal(principal);
+        for (name, value) in centaur_iron_proxy::placeholder_env(&[fragment]) {
+            spec = spec.env(name, value);
+        }
+        Ok(Some(CuratorInferenceRuntime::new(
+            SandboxRuntime::backend(Arc::new(backend), spec.clone()),
+            spec,
+            Duration::from_secs(self.curator_inference_timeout_secs),
+        )))
     }
 
     fn persona_registry(&self) -> Result<PersonaRegistry, ServerError> {

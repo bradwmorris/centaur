@@ -26,10 +26,11 @@ pub(crate) enum Capability {
     WorkflowsEvents,
     AdminArchive,
     AdminSync,
+    CuratorInference,
 }
 
 impl Capability {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::SessionsRead,
         Self::SessionsWrite,
         Self::SandboxesDrain,
@@ -38,6 +39,7 @@ impl Capability {
         Self::WorkflowsEvents,
         Self::AdminArchive,
         Self::AdminSync,
+        Self::CuratorInference,
     ];
 }
 
@@ -139,6 +141,18 @@ impl ApiAuthConfig {
                 Some(spec.platform_prefixes),
             ));
         }
+        if let Some(token) = optional_env("CENTAUR_CONTEXT_API_KEY") {
+            if token.len() < 32 {
+                return Err(ApiAuthConfigError::WeakToken("CENTAUR_CONTEXT_API_KEY"));
+            }
+            callers.push(static_caller(
+                "centaur-context",
+                CallerClass::Ingress,
+                token,
+                [Capability::CuratorInference],
+                None,
+            ));
+        }
 
         validate_unique_tokens(&callers)?;
         Ok(Self {
@@ -173,6 +187,26 @@ impl ApiAuthConfig {
                 Capability::WorkflowsEvents,
             ],
             Some(&["slack:"]),
+        )];
+        Self {
+            static_callers: Arc::new(callers),
+            jwt_secret: Arc::from(jwt_secret.into()),
+            jwt_audience: Arc::from(DEFAULT_API_JWT_AUDIENCE),
+            jwt_issuer: Arc::from(DEFAULT_API_JWT_ISSUER),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn testing_with_context(
+        context_key: impl Into<String>,
+        jwt_secret: impl Into<String>,
+    ) -> Self {
+        let callers = vec![static_caller(
+            "centaur-context",
+            CallerClass::Ingress,
+            context_key.into(),
+            [Capability::CuratorInference],
+            None,
         )];
         Self {
             static_callers: Arc::new(callers),
@@ -261,6 +295,8 @@ pub enum ApiAuthConfigError {
     MissingEnvironment(&'static str),
     #[error("api-rs authentication keys for {first} and {second} must be distinct")]
     DuplicateToken { first: String, second: String },
+    #[error("{0} must be at least 32 characters")]
+    WeakToken(&'static str),
 }
 
 #[derive(Deserialize)]
@@ -413,6 +449,20 @@ mod tests {
         let caller = auth.authenticate(&headers).unwrap();
         assert_eq!(caller.class(), CallerClass::Console);
         assert!(caller.has_capability(Capability::AdminSync));
+    }
+
+    #[test]
+    fn context_token_has_only_curator_inference_capability() {
+        let auth = ApiAuthConfig::testing_with_context("context-token", "jwt-secret");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer context-token".parse().unwrap(),
+        );
+        let caller = auth.authenticate(&headers).unwrap();
+        assert!(caller.has_capability(Capability::CuratorInference));
+        assert!(!caller.has_capability(Capability::SessionsRead));
+        assert!(!caller.has_capability(Capability::SessionsWrite));
     }
 
     #[test]
