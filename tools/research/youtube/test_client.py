@@ -1,4 +1,5 @@
 import sys
+import tomllib
 from pathlib import Path
 
 import httpx
@@ -7,6 +8,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.research.youtube.client import YouTubeClient
+
+
+def test_manifest_allows_public_caption_hosts():
+    manifest = tomllib.loads((Path(__file__).parent / "pyproject.toml").read_text())
+
+    assert manifest["tool"]["centaur"]["hosts"] == ["www.youtube.com"]
 
 
 def test_get_transcript_supports_urls_and_negative_time_slices():
