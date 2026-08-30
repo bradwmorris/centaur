@@ -56,6 +56,9 @@ use crate::{
     ApiError,
     api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
     auth::{ApiAuthConfig, AuthenticatedCaller, CallerClass, Capability},
+    curator_inference::{
+        CuratorInferenceRequest, CuratorInferenceResponse, CuratorInferenceRuntime,
+    },
     mcp::{mcp_get, mcp_post, mcp_protected_resource_metadata},
     slack_proxy::slack_proxy_router,
     types::{
@@ -81,6 +84,7 @@ struct AppRuntimeState {
     workflows: Option<WorkflowRuntime>,
     pool: Option<PgPool>,
     workflow_host_principal: Option<String>,
+    curator_inference: Option<CuratorInferenceRuntime>,
 }
 
 impl AppState {
@@ -126,6 +130,7 @@ impl AppState {
             workflows,
             pool,
             workflow_host_principal: None,
+            curator_inference: None,
         });
     }
 
@@ -145,6 +150,28 @@ impl AppState {
             workflows,
             pool,
             workflow_host_principal: Some(workflow_host_principal),
+            curator_inference: None,
+        });
+    }
+
+    pub fn mark_ready_with_services(
+        &self,
+        runtime: SessionRuntime,
+        workflows: Option<WorkflowRuntime>,
+        pool: Option<PgPool>,
+        workflow_host_principal: String,
+        curator_inference: Option<CuratorInferenceRuntime>,
+    ) {
+        let mut initialized = self
+            .initialized
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *initialized = Some(AppRuntimeState {
+            runtime,
+            workflows,
+            pool,
+            workflow_host_principal: Some(workflow_host_principal),
+            curator_inference,
         });
     }
 
@@ -177,6 +204,14 @@ impl AppState {
         self.initialized()
             .map(|initialized| initialized.runtime)
             .ok_or_else(|| ApiError::ServiceUnavailable("api-rs is still starting".to_owned()))
+    }
+
+    fn curator_inference(&self) -> Result<CuratorInferenceRuntime, ApiError> {
+        self.initialized()
+            .and_then(|initialized| initialized.curator_inference)
+            .ok_or_else(|| {
+                ApiError::ServiceUnavailable("curator inference is not enabled".to_owned())
+            })
     }
 
     fn workflows(&self) -> Result<WorkflowRuntime, ApiError> {
@@ -259,6 +294,7 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         )
         .route("/api/session/{thread_key}/events", get(stream_events))
         .route("/api/sandboxes/drain", post(drain_sandboxes))
+        .route("/api/internal/context-curator/infer", post(curator_infer))
         .merge(slack_proxy_router())
         .route("/api/workflows/schedules", get(list_workflow_schedules))
         .route(
@@ -544,6 +580,9 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
             capability(Capability::SessionsWrite)
         }
         (&Method::POST, "/api/sandboxes/drain") => capability(Capability::SandboxesDrain),
+        (&Method::POST, "/api/internal/context-curator/infer") => {
+            capability(Capability::CuratorInference)
+        }
         (&Method::GET, "/api/workflows/schedules")
         | (&Method::GET, "/api/workflows/runs")
         | (&Method::GET, "/api/workflows/runs/{run_id}") => capability(Capability::WorkflowsRead),
@@ -570,6 +609,13 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         }
         _ => None,
     }
+}
+
+async fn curator_infer(
+    State(state): State<AppState>,
+    Json(request): Json<CuratorInferenceRequest>,
+) -> Result<Json<CuratorInferenceResponse>, ApiError> {
+    Ok(Json(state.curator_inference()?.infer(request).await?))
 }
 
 async fn http_metrics(req: Request, next: Next) -> Response {

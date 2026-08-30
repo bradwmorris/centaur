@@ -1,4 +1,7 @@
 {{- if .Values.apiRs.enabled }}
+{{- if and .Values.apiRs.curatorInference.enabled (ne .Values.sandbox.codexAuthMode "access_token") -}}
+{{- fail "apiRs.curatorInference.enabled requires sandbox.codexAuthMode=access_token" -}}
+{{- end -}}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl -}}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
@@ -232,6 +235,17 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" .Values.secretManager.envPrefix }}
+{{- if .Values.apiRs.curatorInference.enabled }}
+            - name: CENTAUR_CONTEXT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sCENTAUR_CONTEXT_API_KEY" .Values.secretManager.envPrefix }}
+            - name: CURATOR_INFERENCE_ENABLED
+              value: "true"
+            - name: CURATOR_INFERENCE_TIMEOUT_SECS
+              value: {{ .Values.apiRs.curatorInference.timeoutSecs | quote }}
+{{- end }}
 {{- range $ingress := list
   (dict "enabled" .Values.slackbotv2.enabled "key" "SLACKBOT_API_KEY")
   (dict "enabled" .Values.discordbot.enabled "key" "DISCORDBOT_API_KEY")

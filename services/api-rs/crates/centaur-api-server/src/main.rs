@@ -77,8 +77,10 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     let pool = store.pool().clone();
     let sandbox_runtime = args.sandbox_runtime().await?;
     let iron_control = args.iron_control_runtime().await?;
-    let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime, iron_control.registrar)
-        .with_openai_session_title_generator_from_env();
+    let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime, iron_control.registrar);
+    if std::env::var("CODEX_AUTH_MODE").as_deref() != Ok("access_token") {
+        runtime = runtime.with_openai_session_title_generator_from_env();
+    }
     runtime = runtime.with_personas(args.persona_registry()?);
     let sandbox_capacity_config = args.sandbox_capacity_config();
     if let Some(config) = sandbox_capacity_config {
@@ -91,6 +93,9 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     runtime = runtime.with_sandbox_cleanup(args.sandbox_cleanup_config());
     let workflow_host_sandbox = args
         .workflow_host_sandbox_runtime(&iron_control.workflow_host_principal)
+        .await?;
+    let curator_inference = args
+        .curator_inference_runtime(&iron_control.curator_inference_principal)
         .await?;
     let workflows = Some(
         WorkflowRuntime::new(
@@ -118,11 +123,12 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         }
     }
 
-    app_state.mark_ready_with_workflow_host(
+    app_state.mark_ready_with_services(
         runtime,
         workflows,
         Some(pool),
         iron_control.workflow_host_principal,
+        curator_inference,
     );
     info!("centaur api-rs runtime initialized");
     Ok(())

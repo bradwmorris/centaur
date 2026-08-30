@@ -66,6 +66,7 @@ Minimum keys:
 | `SLACK_SIGNING_SECRET` | Slackbot/API | Used to verify Slack webhook signatures. |
 | `SLACKBOT_API_KEY` | Slackbot to API | Dedicated static service token restricted to Slack session routes and workflow event emission. |
 | `CENTAUR_APIRS_ADMIN_API_KEY` | Optional administrator access to API | Static bearer token with every api-rs capability. Generate with `openssl rand -hex 32`, store it in the infra Secret, and keep it distinct from all ingress keys. |
+| `CENTAUR_CONTEXT_API_KEY` | Context Curator to private inference API | Dedicated static bearer token with only the Curator inference capability. Required when `apiRs.curatorInference.enabled=true`; keep it distinct from every other API key. |
 | `OP_CONNECT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password Connect source (preferred) | Needed when `ironProxy.secretSource` is `onepassword-connect`. |
 | `OP_SERVICE_ACCOUNT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password service-account source | Needed when `ironProxy.secretSource` is `onepassword`. |
 | `OP_VAULT` | [iron-proxy](https://docs.iron.sh) 1Password source | Vault name or id used for `op://` references (either mode). |
@@ -180,8 +181,8 @@ component that acts on the mode.
 
 | Mode | Upstream | Credentials required |
 |------|----------|----------------------|
-| `api_key` (default) | `api.openai.com` | `OPENAI_API_KEY` in the secrets backend |
-| `access_token` | `chatgpt.com` | `OPENAI_CODEX_ACCOUNT_ID` in the secrets backend, plus the `openai-codex` broker credential in the console |
+| `access_token` (chart default) | `chatgpt.com` | `OPENAI_CODEX_ACCOUNT_ID` in the secrets backend, plus the `openai-codex` broker credential in the console |
+| `api_key` (rollback) | `api.openai.com` | `OPENAI_API_KEY` in the secrets backend |
 
 `access_token` mode routes Codex through a ChatGPT account rather than a raw
 API key. The console owns the refresh token as the `openai-codex` broker
@@ -190,6 +191,31 @@ tokens, which the per-sandbox proxy injects on outbound requests so the
 sandbox never sees them. The refresh token is stored encrypted in the
 console's own database. It is not read from or synced to your secrets
 backend.
+
+To run Centaur Context's Curator on the same subscription, set
+`apiRs.curatorInference.enabled=true`, keep `sandbox.codexAuthMode=access_token`,
+and configure Context with the private api-rs endpoint, the matching
+`CENTAUR_CONTEXT_API_KEY`, and exact model `gpt-5.6-luna`. Each request runs in
+an ephemeral repo-less sandbox with read-only Codex execution and a structured
+output schema; api-rs rejects observed command or MCP tool activity and does
+not create a durable Centaur session. Set Context's transport to `direct_api`
+to roll back without changing the agent authentication mode.
+
+For a complete API-key rollback, change both chart values together:
+
+```yaml
+sandbox:
+  codexAuthMode: api_key
+apiRs:
+  curatorInference:
+    enabled: false
+```
+
+Then set Context's `CURATOR_MODEL_TRANSPORT=direct_api` and point its model URL,
+token, and model at the approved direct provider before restarting either
+deployment. Existing in-flight subscription turns may fail during the rollout;
+they are not replayed across authentication modes, while queued Curator runs
+remain retryable under their stable run/attempt idempotency keys.
 
 The commands below assume you are at the root of a Centaur checkout and have
 configured `IRON_CONTROL_URL` and `IRON_CONTROL_API_KEY` as described in
