@@ -105,13 +105,6 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
-{{- if .Values.apiRs.curatorInference.enabled }}
-        # The Context Curator has one purpose-bound bearer capability and can
-        # reach only the private inference route enforced by api-rs.
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: centaur-context
-{{- end }}
       ports:
         - protocol: TCP
           port: 5432
@@ -204,6 +197,13 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
+{{- if .Values.apiRs.curatorInference.enabled }}
+        # The Context Curator has one purpose-bound bearer capability and can
+        # reach only the private inference route enforced by api-rs.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: centaur-context
+{{- end }}
 {{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
         - namespaceSelector:
             matchLabels:
