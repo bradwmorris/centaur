@@ -110,6 +110,15 @@ export type SlackbotV2InterruptSessionResponse = {
 
 export type SlackbotV2Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
+export type SlackIdentityOverride = {
+  displayName?: string
+  avatarAsset?: {
+    sha256: string
+    filename: string
+    provenance?: JsonObject
+  }
+}
+
 export type SlackbotV2BlockActionPayload = {
   action_id: string
   action_ts?: string
@@ -199,6 +208,12 @@ export type SlackbotV2Options = {
     url: string
     token: string
     timeoutMs?: number
+    /** Successful users.info entries are refreshed on the first snapshot after this TTL. */
+    profileTtlMs?: number
+    /** Optional canonical presentation for this Slackbot instance's own user. */
+    botIdentity?: SlackIdentityOverride
+    /** Optional canonical presentation keyed by Slack provider user ID. */
+    identityOverrides?: Record<string, SlackIdentityOverride>
     usage?: {
       provider: string
       authMode: 'chatgpt_subscription' | 'api_key' | 'not_applicable' | 'unknown'
