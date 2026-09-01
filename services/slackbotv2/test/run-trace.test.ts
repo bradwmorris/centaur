@@ -116,6 +116,9 @@ describe('interaction Run trace', () => {
       status: 'completed'
     })
     expect(collector.affectedObjectIds()).toEqual([])
+    expect(run.consultedObjectIds).toEqual([
+      '00000000-0000-4000-8000-000000000789'
+    ])
   })
 
   test('closes any still-running spans when the interaction finishes', () => {

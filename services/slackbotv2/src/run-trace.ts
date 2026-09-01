@@ -6,6 +6,7 @@ const MAX_AFFECTED_OBJECTS = 100
 export class InteractionRunTraceCollector {
   readonly #trace: SlackbotV2Trace
   readonly #affectedObjectIds = new Set<string>()
+  readonly #consultedObjectIds = new Set<string>()
 
   constructor(trace: SlackbotV2Trace) {
     this.#trace = trace
@@ -59,6 +60,16 @@ export class InteractionRunTraceCollector {
       }
     })
     if (completed && isMutatingTool(item)) collectObjectIds(item, this.#affectedObjectIds)
+    if (completed && isContextTool(item) && !isMutatingTool(item)) {
+      collectObjectIds(item, this.#consultedObjectIds)
+      collectCommandObjectIds(item, this.#consultedObjectIds)
+      this.#trace.consultedObjectIds = [
+        ...new Set([
+          ...(this.#trace.consultedObjectIds ?? []),
+          ...this.#consultedObjectIds
+        ])
+      ].slice(0, MAX_AFFECTED_OBJECTS)
+    }
   }
 
   affectedObjectIds(): string[] {
@@ -127,6 +138,22 @@ function isMutatingTool(item: JsonObject): boolean {
   }
   const name = (text(item.name) ?? text(item.tool) ?? '').replaceAll('_', '-').toLowerCase()
   return /^(create|update|delete|commit|link|unlink|attach|detach|ingest|enqueue)-/.test(name)
+}
+
+function isContextTool(item: JsonObject): boolean {
+  const command = text(item.command)
+  if (command?.match(/\bcentaur-context\s+[a-z][a-z0-9-]*(?:\s|$)/i)) return true
+  const name = (text(item.name) ?? text(item.tool) ?? '').replaceAll('_', '-').toLowerCase()
+  return name.startsWith('centaur-context-')
+}
+
+function collectCommandObjectIds(item: JsonObject, ids: Set<string>): void {
+  const command = text(item.command)
+  if (!command) return
+  for (const match of command.matchAll(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi)) {
+    ids.add(match[0])
+    if (ids.size >= MAX_AFFECTED_OBJECTS) return
+  }
 }
 
 function toolStatus(item: JsonObject): string {
