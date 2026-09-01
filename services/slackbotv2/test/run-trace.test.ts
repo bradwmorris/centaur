@@ -63,6 +63,35 @@ describe('interaction Run trace', () => {
     expect(run.runEntries![0]?.status).toBe('completed')
   })
 
+  test('names Context CLI writes and captures Object IDs from JSON command output', () => {
+    const run = trace()
+    const collector = new InteractionRunTraceCollector(run)
+    collector.capture({
+      eventKind: 'session.output.line',
+      data: JSON.stringify({
+        method: 'item/completed',
+        params: {
+          item: {
+            id: 'exec-1',
+            type: 'commandExecution',
+            command: "/bin/bash -lc 'centaur-context create-note test --description context'",
+            aggregatedOutput: 'Built centaur-context\n{\n  "object_id": "00000000-0000-4000-8000-000000000456",\n  "content": "private"\n}\n',
+            status: 'completed'
+          }
+        }
+      })
+    })
+
+    expect(run.runEntries![0]).toMatchObject({
+      name: 'centaur-context create-note',
+      status: 'completed'
+    })
+    expect(JSON.stringify(run.runEntries![0])).not.toContain('private')
+    expect(collector.affectedObjectIds()).toEqual([
+      '00000000-0000-4000-8000-000000000456'
+    ])
+  })
+
   test('closes any still-running spans when the interaction finishes', () => {
     const run = trace()
     run.runEntries = [{ id: 'execution-1', status: 'running' }]

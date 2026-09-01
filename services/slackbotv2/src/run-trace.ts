@@ -112,6 +112,9 @@ function isToolItem(item: JsonObject): boolean {
 }
 
 function toolName(item: JsonObject): string {
+  const command = text(item.command)
+  const contextCommand = command?.match(/\bcentaur-context\s+(create-note|create-task)(?:\s|$)/)
+  if (contextCommand?.[1]) return `centaur-context ${contextCommand[1]}`
   return text(item.name) ?? text(item.tool) ?? text(item.type) ?? 'tool call'
 }
 
@@ -124,6 +127,10 @@ function collectObjectIds(value: unknown, ids: Set<string>, key = ''): void {
   if (ids.size >= MAX_AFFECTED_OBJECTS) return
   if (typeof value === 'string') {
     if ((key.endsWith('_id') || key.endsWith('_ids')) && UUID.test(value)) ids.add(value)
+    if (key === 'aggregatedOutput' || key === 'output') {
+      const parsed = parseCommandOutput(value)
+      if (parsed) collectObjectIds(parsed, ids)
+    }
     return
   }
   if (Array.isArray(value)) {
@@ -133,6 +140,17 @@ function collectObjectIds(value: unknown, ids: Set<string>, key = ''): void {
   const record = asRecord(value)
   if (!record) return
   for (const [childKey, child] of Object.entries(record)) collectObjectIds(child, ids, childKey)
+}
+
+function parseCommandOutput(value: string): JsonObject | undefined {
+  const trimmed = value.trim()
+  const direct = parseJson(trimmed)
+  if (direct) return direct
+  for (let index = trimmed.lastIndexOf('\n{'); index >= 0; index = trimmed.lastIndexOf('\n{', index - 1)) {
+    const parsed = parseJson(trimmed.slice(index + 1))
+    if (parsed) return parsed
+  }
+  return undefined
 }
 
 function text(value: unknown): string | undefined {
