@@ -92,6 +92,32 @@ describe('interaction Run trace', () => {
     ])
   })
 
+  test('names Context CLI reads without treating returned Objects as affected', () => {
+    const run = trace()
+    const collector = new InteractionRunTraceCollector(run)
+    collector.capture({
+      eventKind: 'session.output.line',
+      data: JSON.stringify({
+        method: 'item/completed',
+        params: {
+          item: {
+            id: 'exec-read',
+            type: 'commandExecution',
+            command: "/bin/bash -lc 'centaur-context read-source 00000000-0000-4000-8000-000000000789'",
+            aggregatedOutput: '{"object_id":"00000000-0000-4000-8000-000000000789"}',
+            status: 'completed'
+          }
+        }
+      })
+    })
+
+    expect(run.runEntries![0]).toMatchObject({
+      name: 'centaur-context read-source',
+      status: 'completed'
+    })
+    expect(collector.affectedObjectIds()).toEqual([])
+  })
+
   test('closes any still-running spans when the interaction finishes', () => {
     const run = trace()
     run.runEntries = [{ id: 'execution-1', status: 'running' }]

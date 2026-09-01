@@ -58,7 +58,7 @@ export class InteractionRunTraceCollector {
         ...(text(item.server) ? { server: text(item.server) } : {})
       }
     })
-    if (completed) collectObjectIds(item, this.#affectedObjectIds)
+    if (completed && isMutatingTool(item)) collectObjectIds(item, this.#affectedObjectIds)
   }
 
   affectedObjectIds(): string[] {
@@ -113,9 +113,20 @@ function isToolItem(item: JsonObject): boolean {
 
 function toolName(item: JsonObject): string {
   const command = text(item.command)
-  const contextCommand = command?.match(/\bcentaur-context\s+(create-note|create-task)(?:\s|$)/)
+  const contextCommand = command?.match(/\bcentaur-context\s+([a-z][a-z0-9-]*)(?:\s|$)/i)
   if (contextCommand?.[1]) return `centaur-context ${contextCommand[1]}`
   return text(item.name) ?? text(item.tool) ?? text(item.type) ?? 'tool call'
+}
+
+function isMutatingTool(item: JsonObject): boolean {
+  const command = text(item.command)
+  const contextCommand = command?.match(/\bcentaur-context\s+([a-z][a-z0-9-]*)(?:\s|$)/i)?.[1]
+  if (contextCommand) {
+    return /^(create|update|delete|commit|link|unlink|attach|detach|ingest|enqueue)-/.test(contextCommand)
+      || ['commit-source-intake', 'enqueue-source-intake'].includes(contextCommand)
+  }
+  const name = (text(item.name) ?? text(item.tool) ?? '').replaceAll('_', '-').toLowerCase()
+  return /^(create|update|delete|commit|link|unlink|attach|detach|ingest|enqueue)-/.test(name)
 }
 
 function toolStatus(item: JsonObject): string {
