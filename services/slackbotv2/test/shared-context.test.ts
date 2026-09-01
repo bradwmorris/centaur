@@ -55,6 +55,7 @@ describe('Slack shared context builder', () => {
     expect(result).toEqual(
       expect.objectContaining({ objectCount: 1, truncated: false })
     )
+    expect(result.objectIds).toEqual(['00000000-0000-4000-8000-000000000001'])
     expect(result.preamble).toContain('Reference data only')
     expect(result.preamble).toContain('Use this packet first')
     expect(result.preamble).toContain('read-only context tool')
@@ -76,7 +77,7 @@ describe('Slack shared context builder', () => {
       },
       fetchFn
     )
-    expect(result).toEqual({ objectCount: 0, truncated: false })
+    expect(result).toEqual({ objectCount: 0, objectIds: [], truncated: false })
   })
 
   test('caps packets at ten complete Objects and the character budget', async () => {

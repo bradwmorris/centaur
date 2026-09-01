@@ -30,10 +30,21 @@ export type SlackInteractionSinkEnvelope = {
   messages: SlackInteractionSinkMessage[]
   interaction_finished: boolean
   agent_usage?: EvalUsageAttempt[]
+  run?: {
+    interaction_id: string
+    status: 'running' | 'completed' | 'failed'
+    started_at: string
+    completed_at?: string
+    trace: JsonObject[]
+    affected_object_ids: string[]
+    consulted_object_ids: string[]
+    error?: string
+  }
 }
 
 export type SlackInteractionSnapshotResult = {
   chatObjectId?: string
+  runId?: string
   outcome: 'disabled' | 'skipped' | 'sent'
 }
 
@@ -97,7 +108,14 @@ export async function sendSlackInteractionSnapshot(
   options: SlackbotV2Options,
   currentMessage: SlackbotV2ApiMessage,
   agentUsage: EvalUsageAttempt[] = [],
-  overrides: { interactionFinished?: boolean } = {}
+  overrides: {
+    interactionFinished?: boolean
+    runStatus?: 'running' | 'completed' | 'failed'
+    runTrace?: JsonObject[]
+    affectedObjectIds?: string[]
+    consultedObjectIds?: string[]
+    error?: string
+  } = {}
 ): Promise<SlackInteractionSnapshotResult> {
   const sink = options.interactionSink
   if (!sink) return { outcome: 'disabled' }
@@ -137,6 +155,17 @@ export async function sendSlackInteractionSnapshot(
   if (overrides.interactionFinished !== undefined) {
     envelope.interaction_finished = overrides.interactionFinished
   }
+  const runStatus = overrides.runStatus ?? 'completed'
+  envelope.run = {
+    interaction_id: currentMessage.id,
+    status: runStatus,
+    started_at: currentMessage.timestamp,
+    ...(runStatus === 'running' ? {} : { completed_at: new Date().toISOString() }),
+    trace: overrides.runTrace ?? [],
+    affected_object_ids: overrides.affectedObjectIds ?? [],
+    consulted_object_ids: overrides.consultedObjectIds ?? [],
+    ...(overrides.error ? { error: overrides.error.slice(0, 4_000) } : {})
+  }
 
   const fetchFn = options.fetch ?? fetch
   const controller = new AbortController()
@@ -155,7 +184,13 @@ export async function sendSlackInteractionSnapshot(
       throw new Error(`interaction sink rejected the snapshot with HTTP ${response.status}`)
     }
     const payload: unknown = await response.json()
-    return { chatObjectId: parseChatObjectId(payload), outcome: 'sent' }
+    const result: SlackInteractionSnapshotResult = {
+      chatObjectId: parseChatObjectId(payload),
+      outcome: 'sent'
+    }
+    const runId = parseOptionalUuid(payload, 'run_id')
+    if (runId) result.runId = runId
+    return result
   } finally {
     clearTimeout(timeout)
   }
@@ -259,6 +294,15 @@ function parseChatObjectId(payload: unknown): string {
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
   if (!value || !uuid.test(value)) {
     throw new Error('interaction sink response has an invalid chat_object_id')
+  }
+  return value
+}
+
+function parseOptionalUuid(payload: unknown, field: string): string | undefined {
+  const value = stringValue(asRecord(asRecord(payload).data)[field])
+  if (!value) return undefined
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new Error(`interaction sink response has an invalid ${field}`)
   }
   return value
 }

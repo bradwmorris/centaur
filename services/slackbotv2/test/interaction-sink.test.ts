@@ -167,6 +167,14 @@ describe('Slack interaction sink envelope', () => {
       expect(sinkRequest.body?.messages).toHaveLength(2)
       expect(sinkRequest.body?.interaction_finished).toBe(true)
       expect(sinkRequest.body?.agent_usage).toEqual([])
+      expect(sinkRequest.body?.run).toMatchObject({
+        interaction_id: '1780000001.000100',
+        status: 'completed',
+        started_at: '2026-05-27T00:00:01Z',
+        trace: [],
+        affected_object_ids: [],
+        consulted_object_ids: []
+      })
     } finally {
       slack.stop(true)
     }
