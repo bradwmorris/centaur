@@ -40,6 +40,22 @@ fn rules_from_hosts(hosts: &[String]) -> Vec<RequestRule> {
     hosts.iter().map(RequestRule::host).collect()
 }
 
+fn scoped_rules_from_hosts(
+    hosts: &[String],
+    http_methods: &[String],
+    paths: &[String],
+) -> Vec<RequestRule> {
+    hosts
+        .iter()
+        .map(|host| RequestRule {
+            host: Some(host.clone()),
+            cidr: None,
+            http_methods: http_methods.to_vec(),
+            paths: paths.to_vec(),
+        })
+        .collect()
+}
+
 /// Translate every secret declared by a tool into iron-control inputs to grant
 /// to the tool's role (`role_foreign_id`, e.g. `tool-github`).
 #[cfg(test)]
@@ -345,7 +361,7 @@ fn hmac_input(
             })
             .collect(),
         credentials: field_sources(&hmac.credentials, policy),
-        rules: rules_from_hosts(&hmac.hosts),
+        rules: scoped_rules_from_hosts(&hmac.hosts, &hmac.http_methods, &hmac.paths),
     }
 }
 

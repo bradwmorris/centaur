@@ -168,6 +168,8 @@ pub struct HmacHeader {
 pub struct HmacSignSecret {
     pub name: String,
     pub hosts: Vec<String>,
+    pub http_methods: Vec<String>,
+    pub paths: Vec<String>,
     pub credentials: Vec<(String, FieldSource)>,
     pub headers: Vec<HmacHeader>,
     pub algorithm: String,
@@ -771,6 +773,8 @@ fn parse_hmac(table: &toml::Table, name: &str) -> Result<HmacSignSecret> {
     })?;
     let credentials = parse_hmac_credentials(table.get("credentials"), name)?;
     let headers = parse_hmac_headers(table.get("headers"), name)?;
+    let http_methods = hmac_str_array(table.get("http_methods"), name, "http_methods")?;
+    let paths = hmac_str_array(table.get("paths"), name, "paths")?;
     let algorithm = parse_hmac_enum(table, name, "algorithm", HMAC_ALGORITHMS)?;
     let key_encoding = parse_hmac_enum(table, name, "key_encoding", HMAC_KEY_ENCODINGS)?;
     let output_encoding = parse_hmac_enum(table, name, "output_encoding", HMAC_OUTPUT_ENCODINGS)?;
@@ -783,6 +787,8 @@ fn parse_hmac(table: &toml::Table, name: &str) -> Result<HmacSignSecret> {
     Ok(HmacSignSecret {
         name: name.to_owned(),
         hosts,
+        http_methods,
+        paths,
         credentials,
         headers,
         algorithm,
@@ -792,6 +798,28 @@ fn parse_hmac(table: &toml::Table, name: &str) -> Result<HmacSignSecret> {
         timestamp_format,
         allow_chunked_body,
     })
+}
+
+/// Optional request-rule scoping for an `hmac_sign` secret. Keeping these
+/// fields on the HMAC entry allows multiple webhook credentials on one host to
+/// select the correct signer by method and path.
+fn hmac_str_array(value: Option<&Value>, name: &str, key: &str) -> Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(vec![]);
+    };
+    let arr = value.as_array().ok_or_else(|| {
+        eyre!("hmac_sign entry {name:?} {key:?} must be an array of non-empty strings")
+    })?;
+    arr.iter()
+        .map(|item| {
+            item.as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    eyre!("hmac_sign entry {name:?} {key:?} must be an array of non-empty strings")
+                })
+        })
+        .collect()
 }
 
 /// Port of the `aws_auth` branch of `_parse_secret`. `hosts` is required (no

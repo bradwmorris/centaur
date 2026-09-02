@@ -197,7 +197,7 @@ fn brokered_token_honors_credential_and_inject_overrides() {
     assert_eq!(broker.inject_formatter, "{{.Value}}");
 }
 
-const FALCONX_HMAC: &str = r#"{ type = "hmac_sign", name = "FALCONX_P1", hosts = ["api.falconx.io"], algorithm = "sha256", key_encoding = "base64", output_encoding = "base64", timestamp_format = "unix_seconds", message = "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}", credentials = { key = "FALCONX_P1_API_KEY", secret = "FALCONX_P1_SECRET_KEY", passphrase = "FALCONX_P1_PASSPHRASE" }, headers = [ { name = "FX-ACCESS-KEY", value = "{{.Credentials.key}}" }, { name = "FX-ACCESS-SIGN", value = "{{.Signature}}" }, { name = "FX-ACCESS-TIMESTAMP", value = "{{.Timestamp}}" }, { name = "FX-ACCESS-PASSPHRASE", value = "{{.Credentials.passphrase}}" } ] }"#;
+const FALCONX_HMAC: &str = r#"{ type = "hmac_sign", name = "FALCONX_P1", hosts = ["api.falconx.io"], http_methods = ["POST"], paths = ["/v1/orders/*"], algorithm = "sha256", key_encoding = "base64", output_encoding = "base64", timestamp_format = "unix_seconds", message = "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}", credentials = { key = "FALCONX_P1_API_KEY", secret = "FALCONX_P1_SECRET_KEY", passphrase = "FALCONX_P1_PASSPHRASE" }, headers = [ { name = "FX-ACCESS-KEY", value = "{{.Credentials.key}}" }, { name = "FX-ACCESS-SIGN", value = "{{.Signature}}" }, { name = "FX-ACCESS-TIMESTAMP", value = "{{.Timestamp}}" }, { name = "FX-ACCESS-PASSPHRASE", value = "{{.Credentials.passphrase}}" } ] }"#;
 
 #[test]
 fn parses_hmac_sign_secret() {
@@ -207,6 +207,8 @@ fn parses_hmac_sign_secret() {
     };
     assert_eq!(hmac.name, "FALCONX_P1");
     assert_eq!(hmac.hosts, vec!["api.falconx.io".to_owned()]);
+    assert_eq!(hmac.http_methods, vec!["POST".to_owned()]);
+    assert_eq!(hmac.paths, vec!["/v1/orders/*".to_owned()]);
     assert_eq!(hmac.algorithm, "sha256");
     assert_eq!(hmac.key_encoding, "base64");
     assert_eq!(hmac.output_encoding, "base64");
@@ -631,6 +633,22 @@ fn translates_hmac_to_input() {
     );
     assert_eq!(input.rules.len(), 1);
     assert_eq!(input.rules[0].host.as_deref(), Some("api.falconx.io"));
+    assert_eq!(input.rules[0].http_methods, vec!["POST".to_owned()]);
+    assert_eq!(input.rules[0].paths, vec!["/v1/orders/*".to_owned()]);
+}
+
+#[test]
+fn hmac_rejects_invalid_request_scopes() {
+    for bad in [
+        r#"{ type = "hmac_sign", name = "X", hosts = ["x.com"], http_methods = "POST", algorithm = "sha256", key_encoding = "raw", output_encoding = "hex", timestamp_format = "unix_seconds", message = "{{.Body}}", credentials = { secret = "S" }, headers = [ { name = "Sig", value = "{{.Signature}}" } ] }"#,
+        r#"{ type = "hmac_sign", name = "X", hosts = ["x.com"], paths = [""], algorithm = "sha256", key_encoding = "raw", output_encoding = "hex", timestamp_format = "unix_seconds", message = "{{.Body}}", credentials = { secret = "S" }, headers = [ { name = "Sig", value = "{{.Signature}}" } ] }"#,
+    ] {
+        let err = tools::parse_secret(&entry(bad), &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("array of non-empty strings"),
+            "{err}"
+        );
+    }
 }
 
 #[test]
