@@ -61,6 +61,30 @@ describe('interaction Run trace', () => {
     }
     expect(run.runEntries).toHaveLength(1)
     expect(run.runEntries![0]?.status).toBe('completed')
+    expect(run.runEntries![0]?.duration_ms).toBeGreaterThanOrEqual(0)
+    expect(run.runEntries![0]?.facts).toMatchObject({ method: 'search' })
+  })
+
+  test('records a sanitized workflow command and bounded failure class', () => {
+    const run = trace()
+    const collector = new InteractionRunTraceCollector(run)
+    collector.capture({
+      eventKind: 'session.output.line',
+      data: JSON.stringify({
+        method: 'item/completed',
+        params: { item: {
+          id: 'exec-failed', type: 'commandExecution',
+          command: "enyu-context-mutate connect secret-source secret-target --description 'private'",
+          aggregatedOutput: 'private failure detail', exitCode: 2, status: 'failed'
+        } }
+      })
+    })
+    expect(run.runEntries![0]).toMatchObject({
+      name: 'enyu-context-mutate connect', status: 'failed',
+      facts: { method: 'enyu-context-mutate connect', error_class: 'command_exit_2' }
+    })
+    expect(JSON.stringify(run.runEntries![0])).not.toContain('secret-source')
+    expect(JSON.stringify(run.runEntries![0])).not.toContain('private')
   })
 
   test('names Context CLI writes and captures Object IDs from JSON command output', () => {

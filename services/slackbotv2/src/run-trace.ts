@@ -7,6 +7,7 @@ export class InteractionRunTraceCollector {
   readonly #trace: SlackbotV2Trace
   readonly #affectedObjectIds = new Set<string>()
   readonly #consultedObjectIds = new Set<string>()
+  readonly #startedAtMs = new Map<string, number>()
 
   constructor(trace: SlackbotV2Trace) {
     this.#trace = trace
@@ -47,18 +48,26 @@ export class InteractionRunTraceCollector {
     if (!item || !isToolItem(item)) return
     const itemId = text(item.id) ?? `${toolName(item)}:${this.#trace.runEntries?.length ?? 0}`
     const completed = method === 'item/completed'
+    const now = globalThis.performance?.now?.() ?? Date.now()
+    if (!completed) this.#startedAtMs.set(itemId, now)
+    const startedAt = this.#startedAtMs.get(itemId)
+    const status = completed ? toolStatus(item) : 'running'
     appendRunTrace(this.#trace, {
       id: `${this.#trace.messageId}:tool:${itemId}`,
       entry_type: 'tool_call',
       name: toolName(item),
-      status: completed ? toolStatus(item) : 'running',
+      status,
       component: 'centaur_agent',
+      ...(completed && startedAt !== undefined ? { duration_ms: Math.max(0, Math.round(now - startedAt)) } : {}),
       facts: {
         description: completed ? 'Tool call completed.' : 'Tool call started.',
         item_type: text(item.type) ?? 'tool_call',
+        method: toolName(item),
+        ...(status === 'failed' ? { error_class: toolErrorClass(item) } : {}),
         ...(text(item.server) ? { server: text(item.server) } : {})
       }
     })
+    if (completed) this.#startedAtMs.delete(itemId)
     if (completed && isMutatingTool(item)) collectObjectIds(item, this.#affectedObjectIds)
     if (completed && isContextTool(item) && !isMutatingTool(item)) {
       collectObjectIds(item, this.#consultedObjectIds)
@@ -124,8 +133,8 @@ function isToolItem(item: JsonObject): boolean {
 
 function toolName(item: JsonObject): string {
   const command = text(item.command)
-  const contextCommand = command?.match(/\bcentaur-context\s+([a-z][a-z0-9-]*)(?:\s|$)/i)
-  if (contextCommand?.[1]) return `centaur-context ${contextCommand[1]}`
+  const cliCommand = command?.match(/\b(centaur-context|enyu-source-ingest|enyu-context-mutate)\s+([a-z][a-z0-9-]*)(?:\s|$)/i)
+  if (cliCommand?.[1] && cliCommand[2]) return `${cliCommand[1]} ${cliCommand[2]}`
   return text(item.name) ?? text(item.tool) ?? text(item.type) ?? 'tool call'
 }
 
@@ -158,7 +167,16 @@ function collectCommandObjectIds(item: JsonObject, ids: Set<string>): void {
 
 function toolStatus(item: JsonObject): string {
   const status = text(item.status)?.toLowerCase()
-  return status === 'failed' || status === 'error' ? 'failed' : 'completed'
+  const exitCode = typeof item.exitCode === 'number' ? item.exitCode : undefined
+  return status === 'failed' || status === 'error' || (exitCode !== undefined && exitCode !== 0)
+    ? 'failed'
+    : 'completed'
+}
+
+function toolErrorClass(item: JsonObject): string {
+  const exitCode = typeof item.exitCode === 'number' ? item.exitCode : undefined
+  if (exitCode !== undefined) return `command_exit_${exitCode}`
+  return 'tool_failed'
 }
 
 function collectObjectIds(value: unknown, ids: Set<string>, key = ''): void {
