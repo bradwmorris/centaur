@@ -1,4 +1,5 @@
 import type { SlackbotV2RendererSource } from './types'
+import type { InteractionRunTraceCollector } from './run-trace'
 
 export type EvalUsageAttempt = {
   component: string
@@ -100,10 +101,12 @@ export class EvalUsageCollector {
 
 export async function* captureEvalUsage(
   sources: AsyncIterable<SlackbotV2RendererSource>,
-  collector: EvalUsageCollector
+  collector: EvalUsageCollector,
+  runTrace?: InteractionRunTraceCollector
 ): AsyncIterable<SlackbotV2RendererSource> {
   for await (const source of sources) {
     collector.capture(source)
+    runTrace?.capture(source)
     yield source
   }
 }

@@ -313,6 +313,10 @@ export type SlackbotV2Trace = {
   slackUserId?: string
   startedAtMs: number
   threadId: string
+  /** Safe, normalized entries persisted with this interaction's Context Run. */
+  runEntries?: JsonObject[]
+  /** Context Objects actually included in the pre-turn packet. */
+  consultedObjectIds?: string[]
 }
 
 export type ForwardSessionInput = {

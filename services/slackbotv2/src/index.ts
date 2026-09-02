@@ -78,6 +78,7 @@ import {
   type EvalUsageAttempt
 } from './eval-usage'
 import { fetchSharedContext } from './shared-context'
+import { appendRunTrace, finalizeRunTrace, InteractionRunTraceCollector } from './run-trace'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -1040,7 +1041,8 @@ async function syncThreadMessageToSession(
     openStream: shouldStartExecution,
     slackUserId: slackUserIdForMessage(message),
     startedAtMs: traceStartedAtMs,
-    threadId: thread.id
+    threadId: thread.id,
+    runEntries: []
   }
   if (isDuplicateIncrementalMessage) {
     traceLog(input.options, 'slackbotv2_forward_duplicate_skipped', trace)
@@ -1261,16 +1263,39 @@ async function syncThreadMessageToSession(
         input.options.fetch
       )
       sharedContextPreamble = sharedContext.preamble
+      trace.consultedObjectIds = sharedContext.objectIds
       traceLog(input.options, 'slackbotv2_shared_context_collected', trace, {
         object_count: sharedContext.objectCount,
         preamble_chars: sharedContextPreamble?.length ?? 0,
         truncated: sharedContext.truncated,
         phase_ms: elapsedMs(contextBuilderStartedAtMs)
       })
+      appendRunTrace(trace, {
+        id: `${serializedMessage.id}:context-builder`,
+        entry_type: 'context_retrieval',
+        name: 'retrieve Context',
+        status: 'completed',
+        component: 'centaur_context',
+        duration_ms: elapsedMs(contextBuilderStartedAtMs),
+        facts: {
+          description: 'Relevant Context Objects were retrieved.',
+          object_count: sharedContext.objectCount,
+          truncated: sharedContext.truncated
+        }
+      })
     } catch (error) {
       traceWarn(input.options, 'slackbotv2_shared_context_degraded', trace, {
         error: errorMessage(error),
         phase_ms: elapsedMs(contextBuilderStartedAtMs)
+      })
+      appendRunTrace(trace, {
+        id: `${serializedMessage.id}:context-builder`,
+        entry_type: 'context_retrieval',
+        name: 'retrieve Context',
+        status: 'failed',
+        component: 'centaur_context',
+        duration_ms: elapsedMs(contextBuilderStartedAtMs),
+        facts: { description: 'Context retrieval was unavailable; the bot continued.' }
       })
     }
   }
@@ -1388,6 +1413,19 @@ async function syncThreadMessageToSession(
     traceLog(input.options, 'slackbotv2_forward_execution_committed', trace, {
       execution_id: execution.execution_id,
       executed_message_count: Math.min(latestExecutedMessageIds.size, 1000)
+    })
+    appendRunTrace(trace, {
+      id: `${serializedMessage.id}:execution:${execution.execution_id}`,
+      entry_type: 'model_attempt',
+      name: 'agent execution',
+      status: 'running',
+      component: 'centaur_agent',
+      model_id: forwardInput.metadataModel ?? forwardInput.model ?? 'unknown',
+      facts: {
+        description: 'The bot started an agent execution.',
+        execution_id: execution.execution_id,
+        ...(forwardInput.reasoning ? { reasoning_effort: forwardInput.reasoning } : {})
+      }
     })
   }
 
@@ -1530,6 +1568,18 @@ async function syncThreadMessageToSession(
       last_event_id: lastEventId
     })
     recordForward(input.mode, 'error_notice_rendered', traceStartedAtMs)
+    appendRunTrace(trace, {
+      id: `${serializedMessage.id}:interaction-failed`,
+      entry_type: 'interaction',
+      name: 'interaction failed',
+      status: 'failed',
+      component: 'slackbotv2',
+      facts: { description: 'The bot could not start or deliver the interaction.' }
+    })
+    await publishSlackInteractionSnapshot(input.options, serializedMessage, trace, [], {
+      runStatus: 'failed',
+      error: errorMessage(error)
+    })
   }
 }
 
@@ -1545,6 +1595,15 @@ function scheduleExecutionRender(
   responseContextBlock?: SlackContextBlock
 ): void {
   const usageCollector = evalUsageCollector(options, input)
+  const runTraceCollector = new InteractionRunTraceCollector(trace ?? {
+    includeContext: false,
+    messageId: message.id,
+    mode: 'execute',
+    openStream: true,
+    startedAtMs: nowMs(),
+    threadId: message.threadId,
+    runEntries: []
+  })
   const promise = (async () => {
     slackbotMetrics.activeLiveRenders.inc()
     try {
@@ -1558,6 +1617,7 @@ function scheduleExecutionRender(
           getLastEventId,
           assistantStatusVisible,
           usageCollector,
+          runTraceCollector,
           trace,
           responseContextBlock
         )
@@ -1566,7 +1626,8 @@ function scheduleExecutionRender(
             options,
             message,
             trace,
-            usageCollector.finish()
+            usageCollector.finish(),
+            { affectedObjectIds: runTraceCollector.affectedObjectIds() }
           )
           return
         }
@@ -1611,6 +1672,7 @@ async function renderExecutionAttempt(
   getLastEventId: () => number,
   assistantStatusVisible: boolean,
   usageCollector: EvalUsageCollector,
+  runTraceCollector: InteractionRunTraceCollector,
   trace?: SlackbotV2Trace,
   responseContextBlock?: SlackContextBlock
 ): Promise<'complete' | 'retry'> {
@@ -1629,7 +1691,8 @@ async function renderExecutionAttempt(
           streamSessionAfterHandoff(options, input),
           options
         ),
-        usageCollector
+        usageCollector,
+        runTraceCollector
       ),
       message,
       options,
@@ -1776,13 +1839,24 @@ async function publishSlackInteractionSnapshot(
   options: SlackbotV2Options,
   message: SlackbotV2ApiMessage,
   trace?: SlackbotV2Trace,
-  agentUsage: EvalUsageAttempt[] = []
+  agentUsage: EvalUsageAttempt[] = [],
+  overrides: {
+    runStatus?: 'running' | 'completed' | 'failed'
+    affectedObjectIds?: string[]
+    consultedObjectIds?: string[]
+    error?: string
+  } = {}
 ): Promise<void> {
   if (!options.interactionSink) return
+  finalizeRunTrace(trace, overrides.runStatus === 'failed' ? 'failed' : 'completed')
   const startedAtMs = nowMs()
   try {
     const result = await withSlackApiTimeout(options, 'publish Slack interaction snapshot', () =>
-      sendSlackInteractionSnapshot(options, message, agentUsage)
+      sendSlackInteractionSnapshot(options, message, agentUsage, {
+        ...overrides,
+        runTrace: trace?.runEntries,
+        consultedObjectIds: trace?.consultedObjectIds
+      })
     )
     traceLog(options, 'slackbotv2_interaction_snapshot_complete', trace, {
       outcome: result.outcome,
@@ -1805,7 +1879,12 @@ async function resolveSlackContextChatId(
   const startedAtMs = nowMs()
   try {
     const result = await withSlackApiTimeout(options, 'resolve Slack context chat', () =>
-      sendSlackInteractionSnapshot(options, message, [], { interactionFinished: false })
+      sendSlackInteractionSnapshot(options, message, [], {
+        interactionFinished: false,
+        runStatus: 'running',
+        runTrace: trace.runEntries,
+        consultedObjectIds: trace.consultedObjectIds
+      })
     )
     if (!result.chatObjectId) return undefined
     const latest = (await thread.state) ?? {}
@@ -2303,7 +2382,8 @@ async function recoverRenderObligation(
     mode: 'execute',
     openStream: true,
     startedAtMs: nowMs(),
-    threadId
+    threadId,
+    runEntries: []
   }
   const thread = chat.thread(threadId)
   // Replay from the obligation's starting position, not the thread's
@@ -2323,6 +2403,7 @@ async function recoverRenderObligation(
     trace
   }
   const usageCollector = evalUsageCollector(options, input)
+  const runTraceCollector = new InteractionRunTraceCollector(trace)
   const renderStartedAtMs = nowMs()
   let renderOutcome = 'failure'
 
@@ -2366,7 +2447,7 @@ async function recoverRenderObligation(
     })
     const streamResult = await renderRecoveredExecutionStream(
       thread,
-      captureEvalUsage(streamOpenedSession(input, openedStream), usageCollector),
+      captureEvalUsage(streamOpenedSession(input, openedStream), usageCollector, runTraceCollector),
       obligation.message,
       options,
       trace
@@ -2473,7 +2554,8 @@ async function recoverRenderObligation(
         options,
         obligation.message,
         trace,
-        usageCollector.finish()
+        usageCollector.finish(),
+        { affectedObjectIds: runTraceCollector.affectedObjectIds() }
       )
     }
   }
