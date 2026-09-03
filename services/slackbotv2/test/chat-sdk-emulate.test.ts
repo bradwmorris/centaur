@@ -831,6 +831,11 @@ describe('slackbotv2', () => {
     expect(firstResponse.status).toBe(200)
     await Promise.all(firstWaits)
 
+    await slackBot.chat.postMessage({
+      channel: CHANNEL_ID,
+      text: 'Selected RSI object: Economics of RSI (object-id-123).',
+      thread_ts: parent.ts
+    })
     const followUp = await postUserMessage('Create a note on this.', parent.ts)
     const followUpWaits: Promise<unknown>[] = []
     const followUpResponse = await bot.app.request(
@@ -855,6 +860,7 @@ describe('slackbotv2', () => {
     const secondInput = JSON.stringify(JSON.parse(codexApi.executes[1]!.body.input_lines[0]!))
     expect(secondInput).toContain('Five-step evaluation thread.')
     expect(secondInput).toContain('answer from the new source')
+    expect(secondInput).toContain('Selected RSI object: Economics of RSI (object-id-123).')
     expect(secondInput).toContain('Create a note on this.')
   })
 

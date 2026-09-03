@@ -3459,7 +3459,11 @@ async function collectSlackThreadContext(
       const message = rawMessage as Record<string, unknown>
       const messageTs = stringField(message.ts)
       if (!messageTs || compareSlackTs(messageTs, currentTs) > 0) continue
-      if (isSelfSlackBotMessage(options, message)) continue
+      // A fresh per-turn session has no prior harness transcript. Preserve the
+      // bot's visible Slack replies so references such as "this" and "these
+      // items" still resolve on the next turn. Stateful sessions already have
+      // those replies in their harness history and must not import them twice.
+      if (isSelfSlackBotMessage(options, message) && options.freshSessionPerTurn !== true) continue
       messages.push(await slackApiMessageFromSlack(options, message, currentMessage))
     }
     cursor = response.nextCursor
