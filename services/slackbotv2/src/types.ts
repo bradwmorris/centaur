@@ -160,6 +160,10 @@ export type SlackbotV2Options = {
   responseMetadataMode?: 'first' | 'always' | 'never'
   /** Include the Codex service tier in response metadata footers when they render. */
   responseServiceTierEnabled?: boolean
+  /** Execute human replies in an already-subscribed thread without requiring another mention. */
+  executeSubscribedReplies?: boolean
+  /** Start each execution in a fresh harness session rebuilt from visible Slack history. */
+  freshSessionPerTurn?: boolean
   /**
    * Per-channel default harness/model/provider/reasoning, keyed by Slack
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.

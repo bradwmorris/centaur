@@ -806,6 +806,58 @@ describe('slackbotv2', () => {
     expectSlackRenderedReply(renderedReplies[1]!, 'Executed request 2.')
   })
 
+  it('executes one unmentioned subscribed reply in a fresh per-turn session', async () => {
+    bot = createTestBot({
+      executeSubscribedReplies: true,
+      freshSessionPerTurn: true,
+      instanceId: 'researcher'
+    })
+    const parent = await postUserMessage('Five-step evaluation thread.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> answer from the new source`, parent.ts)
+    const firstWaits: Promise<unknown>[] = []
+    const firstResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-fresh-turn-first',
+        event: {
+          type: 'app_mention', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID,
+          ts: mention.ts, thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> answer from the new source`
+        }
+      }),
+      {},
+      waitUntilContext(firstWaits)
+    )
+    expect(firstResponse.status).toBe(200)
+    await Promise.all(firstWaits)
+
+    const followUp = await postUserMessage('Create a note on this.', parent.ts)
+    const followUpWaits: Promise<unknown>[] = []
+    const followUpResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-fresh-turn-follow-up',
+        event: {
+          type: 'message', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID,
+          ts: followUp.ts, thread_ts: parent.ts, text: 'Create a note on this.'
+        }
+      }),
+      {},
+      waitUntilContext(followUpWaits)
+    )
+    expect(followUpResponse.status).toBe(200)
+    await Promise.all(followUpWaits)
+
+    expect(codexApi.executes).toHaveLength(2)
+    expect(codexApi.executes[0]!.threadKey).toContain(`:turn-${mention.ts}`)
+    expect(codexApi.executes[1]!.threadKey).toContain(`:turn-${followUp.ts}`)
+    expect(codexApi.executes[1]!.body.idempotency_key).toBe(followUp.ts)
+    const secondInput = JSON.stringify(JSON.parse(codexApi.executes[1]!.body.input_lines[0]!))
+    expect(secondInput).toContain('Five-step evaluation thread.')
+    expect(secondInput).toContain('answer from the new source')
+    expect(secondInput).toContain('Create a note on this.')
+  })
+
   // The paragraph break (`\n\n`) after the model value is deliberate: the
   // unpatched chat SDK dropped it, gluing the value to the next word
   // (`fablefirst`); this exercises the patched extractPlainText end to end.

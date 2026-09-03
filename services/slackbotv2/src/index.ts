@@ -377,7 +377,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   chat.onSubscribedMessage(async (thread, message) => {
     if (!(await isAllowedSlackMessage(message, options, logger))) return
     if (slackRichTextMentionsUser(message.raw, options.botUserId)) message.isMention = true
-    if (message.isMention !== true) {
+    if (message.isMention !== true && options.executeSubscribedReplies !== true) {
       traceLog(
         options,
         'slackbotv2_subscribed_message_without_mention_ignored',
@@ -385,6 +385,18 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         { trigger: 'subscribed_message' }
       )
       return
+    }
+    if (message.isMention !== true) {
+      const latest = (await thread.state) ?? {}
+      if (latest.activeExecution === true) {
+        traceLog(
+          options,
+          'slackbotv2_subscribed_reply_during_execution_ignored',
+          createHandoffTrace(thread, message, 'execute'),
+          { trigger: 'subscribed_message' }
+        )
+        return
+      }
     }
     lateSlackFiles.rememberFilelessMention(thread, message)
     await handleSlackMessageHandoff(thread, message, {
@@ -1161,8 +1173,10 @@ async function syncThreadMessageToSession(
   const sessionThreadId = centaurSessionThreadKey(
     input.options,
     serializedMessage,
-    thread.id
+    thread.id,
+    shouldStartExecution ? serializedMessage.id : undefined
   )
+  const freshSessionForTurn = shouldStartExecution && input.options.freshSessionPerTurn === true
   let responseContextBlock = isFirstAssistantMessage || includeResponseMetadata
     ? buildSlackResponseContextBlock({
         consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
@@ -1230,10 +1244,12 @@ async function syncThreadMessageToSession(
     })
   }
 
-  let lastEventId = state.lastEventId ?? 0
+  let lastEventId = freshSessionForTurn ? 0 : state.lastEventId ?? 0
   const renderLease: { release: (() => Promise<void>) | null } = { release: null }
   const candidateMessages = context ?? [serializedMessage]
-  const messagesToAppend = candidateMessages.filter(item => !messageIds.has(item.id))
+  const messagesToAppend = freshSessionForTurn
+    ? candidateMessages
+    : candidateMessages.filter(item => !messageIds.has(item.id))
 
   let sharedContextPreamble: string | undefined
   let contextChatObjectId = state.contextChatObjectId
@@ -1920,12 +1936,16 @@ function canonicalSlackContextThreadKey(
 function centaurSessionThreadKey(
   options: SlackbotV2Options,
   message: SlackbotV2ApiMessage,
-  threadId: string
+  threadId: string,
+  turnMessageId?: string
 ): string {
-  if (!options.instanceId) return threadId
+  const turnSuffix = options.freshSessionPerTurn && turnMessageId
+    ? `:turn-${turnMessageId.replace(/[^A-Za-z0-9._-]/g, '-')}`
+    : ''
+  if (!options.instanceId) return `${threadId}${turnSuffix}`
   const canonical = canonicalSlackContextThreadKey(message, threadId).split(':')
-  if (canonical.length !== 4) return `${threadId}:bot-${options.instanceId}`
-  return `${canonical[0]}:${canonical[1]}:bot-${options.instanceId}:${canonical[2]}:${canonical[3]}`
+  if (canonical.length !== 4) return `${threadId}:bot-${options.instanceId}${turnSuffix}`
+  return `${canonical[0]}:${canonical[1]}:bot-${options.instanceId}:${canonical[2]}:${canonical[3]}${turnSuffix}`
 }
 
 function evalUsageCollector(

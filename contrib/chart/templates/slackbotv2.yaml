@@ -113,6 +113,10 @@ spec:
               value: {{ $slackbot.responseMetadataMode | quote }}
             - name: SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED
               value: {{ $slackbot.responseServiceTierEnabled | quote }}
+            - name: SLACKBOTV2_EXECUTE_SUBSCRIBED_REPLIES
+              value: {{ $slackbot.executeSubscribedReplies | quote }}
+            - name: SLACKBOTV2_FRESH_SESSION_PER_TURN
+              value: {{ $slackbot.freshSessionPerTurn | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_STRATEGY
               value: {{ $slackbot.messageOverridesStrategy.mode | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_MODEL

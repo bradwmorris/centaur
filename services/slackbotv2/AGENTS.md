@@ -31,10 +31,10 @@ lifecycle, harness formatting, and durable execution state belong in `api-rs`.
 - Avoid serializing raw webhook bodies on the hot path or in normal logs. Never
   log bot tokens, signing secrets, private file URLs, or user file contents.
 - Preserve mentioned stop commands, harness/model overrides, late-file repair,
-  initial thread context, and mention-gated subscribed-message semantics when
-  refactoring the main callback flow. Unmentioned replies must not be appended
-  to or interrupt an active execution; collect them when the next mention
-  refreshes the Slack thread context.
+  and initial thread context when refactoring the main callback flow. By
+  default, unmentioned subscribed replies are collected when the next mention
+  refreshes Slack context. A deployment may opt into executing them after the
+  prior turn completes; they must never append to or interrupt an active run.
 
 ## Validation
 
