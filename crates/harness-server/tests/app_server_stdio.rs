@@ -304,6 +304,57 @@ fn fake_codex_blocks_mode_uses_openrouter_provider_when_model_is_configured() {
 }
 
 #[test]
+fn fake_codex_blocks_mode_injects_the_selected_persona_prompt() {
+    let fake_codex = temp_path("fake-persona-codex.sh");
+    let fake_codex_log = temp_path("fake-persona-codex-requests.jsonl");
+    let persona_dir = temp_path("researcher-persona");
+    std::fs::create_dir_all(&persona_dir).expect("create persona directory");
+    std::fs::write(
+        persona_dir.join("PROMPT.md"),
+        "Follow the bounded researcher recipe exactly.",
+    )
+    .expect("write persona prompt");
+    std::fs::write(&fake_codex, fake_codex_app_server_script(&fake_codex_log))
+        .expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let persona_path = persona_dir.to_str().expect("utf-8 persona path");
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+        &[("CENTAUR_PERSONA_SOURCE_PATH", persona_path)],
+    );
+    let turn = bridge.run_blocks_user_turn("use the persona", Duration::from_secs(10));
+    bridge.finish_successfully();
+    assert_completed_turn(&turn);
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let thread_start: Value = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .find(|value: &Value| value.get("method").and_then(Value::as_str) == Some("thread/start"))
+        .unwrap_or_else(|| panic!("blocks mode did not send thread/start; requests={requests:?}"));
+    assert_eq!(
+        thread_start
+            .pointer("/params/developerInstructions")
+            .and_then(Value::as_str),
+        Some("Follow the bounded researcher recipe exactly.")
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+    let _ = std::fs::remove_dir_all(persona_dir);
+}
+
+#[test]
 fn fake_codex_blocks_mode_uses_openrouter_provider_for_explicit_model_slug() {
     let fake_codex = temp_path("fake-openrouter-flag-codex.sh");
     let fake_codex_log = temp_path("fake-openrouter-flag-codex-requests.jsonl");
@@ -1276,6 +1327,7 @@ impl BridgeProcess {
             "CODEX_MODEL",
             "CODEX_MODEL_PROVIDER",
             "OPENROUTER_MODEL",
+            "CENTAUR_PERSONA_SOURCE_PATH",
         ] {
             command.env_remove(env_key);
         }

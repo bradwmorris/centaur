@@ -1,5 +1,6 @@
 use std::env;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command as ProcessCommand, Stdio};
 use std::sync::{
     Arc,
@@ -461,7 +462,8 @@ fn start_or_resume_thread<W: Write>(
     let resume = env::var("CODEX_CONTINUE_THREAD_ID")
         .or_else(|_| env::var("AMP_CONTINUE_THREAD_ID"))
         .unwrap_or_default();
-    let (method, params) = if resume.trim().is_empty() {
+    let persona_instructions = persona_developer_instructions()?;
+    let (method, mut params) = if resume.trim().is_empty() {
         (
             "thread/start",
             json!({
@@ -486,11 +488,40 @@ fn start_or_resume_thread<W: Write>(
             }),
         )
     };
+    if method == "thread/start"
+        && let Some(instructions) = persona_instructions
+    {
+        params["developerInstructions"] = Value::String(instructions);
+    }
 
     let id = next_request_id(request_id);
     codex.send_request(id, method, params, traceparent)?;
     let result = codex.read_response_or_forward(id, stdout)?;
     started_codex_thread_from_response(&result, method)
+}
+
+fn persona_developer_instructions() -> Result<Option<String>> {
+    let Some(source_path) = env::var("CENTAUR_PERSONA_SOURCE_PATH")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let prompt_path = Path::new(&source_path).join("PROMPT.md");
+    let instructions = std::fs::read_to_string(&prompt_path).map_err(|source| {
+        HarnessServerError::Protocol(format!(
+            "persona prompt {} could not be read: {source}",
+            prompt_path.display()
+        ))
+    })?;
+    if instructions.trim().is_empty() {
+        return Err(HarnessServerError::Protocol(format!(
+            "persona prompt {} is empty",
+            prompt_path.display()
+        )));
+    }
+    Ok(Some(instructions))
 }
 
 fn started_codex_thread_from_response(result: &Value, method: &str) -> Result<StartedCodexThread> {
