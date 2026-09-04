@@ -1258,6 +1258,7 @@ async function syncThreadMessageToSession(
           chatObjectId: contextChatObjectId,
           principalId: `slack:${slackUserIdForMessage(serializedMessage) ?? 'unknown'}`,
           query: slackMessagePromptText(serializedMessage),
+          triggerMessageTs: serializedMessage.id,
           threadKey: canonicalSlackContextThreadKey(serializedMessage, thread.id)
         },
         input.options.fetch
