@@ -24,11 +24,9 @@ use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 
 use crate::{
-    AgentSandboxBackend, MANAGED_BY_LABEL, MANAGED_BY_VALUE, OBSERVABILITY_ENABLED_LABEL,
-    OtlpEgressTarget, SANDBOX_ID_LABEL, is_not_found, map_kube_error,
+    AgentSandboxBackend, IRON_PROXY_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE,
+    OBSERVABILITY_ENABLED_LABEL, OtlpEgressTarget, SANDBOX_ID_LABEL, is_not_found, map_kube_error,
 };
-
-const IRON_PROXY_LABEL: &str = "centaur.ai/iron-proxy";
 const IRON_CONTROL_PROXY_ID_ANNOTATION: &str = "centaur.ai/iron-control-proxy-id";
 const FIREWALL_CA_MOUNT_PATH: &str = "/firewall-certs";
 pub(crate) const FIREWALL_CA_CERT_PATH: &str = "/firewall-certs/ca-cert.pem";
@@ -355,7 +353,7 @@ impl AgentSandboxBackend {
         self.services()
             .create(
                 &PostParams::default(),
-                &build_iron_proxy_service(id, resolved),
+                &build_iron_proxy_service(id, resolved, &sync.proxy_id),
             )
             .await
             .map_err(|err| map_kube_error("create iron-proxy service", err))?;
@@ -504,7 +502,22 @@ impl AgentSandboxBackend {
         //
         // Deregister the iron-control proxy first (best-effort): once the pod is
         // gone the token is useless, and a stale proxy row just fails to sync.
-        if let Some(proxy_id) = self.proxy_ids.lock().await.remove(id.as_str()) {
+        // Recover the registration OID from the pod annotation after an
+        // api-rs restart. Relying only on the process-local map deletes the
+        // Kubernetes resources but leaks the iron-control proxy row.
+        let proxy_id = match self.proxy_id_for_sandbox(id).await {
+            Ok(proxy_id) => proxy_id,
+            Err(error) => {
+                tracing::warn!(
+                    sandbox_id = id.as_str(),
+                    %error,
+                    "failed to recover iron-control proxy id during cleanup"
+                );
+                self.proxy_ids.lock().await.get(id.as_str()).cloned()
+            }
+        };
+        self.proxy_ids.lock().await.remove(id.as_str());
+        if let Some(proxy_id) = proxy_id {
             let _ = self
                 .config
                 .iron_control
@@ -935,7 +948,20 @@ impl AgentSandboxBackend {
                 return Ok(Some(proxy_id));
             }
         }
-        Ok(None)
+        match self.services().get(&iron_proxy_service_name(id)).await {
+            Ok(service) => Ok(service
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(IRON_CONTROL_PROXY_ID_ANNOTATION))
+                .filter(|value| !value.trim().is_empty())
+                .cloned()),
+            Err(err) if is_not_found(&err) => Ok(None),
+            Err(err) => Err(map_kube_error(
+                "get iron-proxy service for proxy id recovery",
+                err,
+            )),
+        }
     }
 
     async fn has_usable_iron_proxy_resources(&self, id: &SandboxId) -> SandboxResult<bool> {
@@ -982,7 +1008,7 @@ impl AgentSandboxBackend {
             .map_err(|err| map_kube_error("patch sandbox iron-control principal", err))
     }
 
-    fn services(&self) -> Api<Service> {
+    pub(crate) fn services(&self) -> Api<Service> {
         Api::namespaced(self.client.clone(), &self.config.namespace)
     }
 
@@ -1469,16 +1495,25 @@ fn iron_proxy_volumes(iron_proxy: &IronProxyConfig) -> Vec<Volume> {
     ]
 }
 
-fn build_iron_proxy_service(id: &SandboxId, resolved: &ResolvedIronProxy) -> Service {
+fn build_iron_proxy_service(
+    id: &SandboxId,
+    resolved: &ResolvedIronProxy,
+    proxy_id: &str,
+) -> Service {
     let mut ports = vec![service_port("proxy", resolved.proxy_port)];
     if let Some(pg) = &resolved.pg {
         ports.push(service_port("pg", pg.port));
     }
+    let mut metadata = object_meta(
+        iron_proxy_service_name(id),
+        iron_proxy_labels(id, resolved.observability_enabled),
+    );
+    metadata.annotations = Some(BTreeMap::from([(
+        IRON_CONTROL_PROXY_ID_ANNOTATION.to_owned(),
+        proxy_id.to_owned(),
+    )]));
     Service {
-        metadata: object_meta(
-            iron_proxy_service_name(id),
-            iron_proxy_labels(id, resolved.observability_enabled),
-        ),
+        metadata,
         spec: Some(ServiceSpec {
             selector: Some(iron_proxy_labels(id, resolved.observability_enabled)),
             ports: Some(ports),
@@ -2428,7 +2463,7 @@ mod tests {
             Some("true")
         );
 
-        let service = build_iron_proxy_service(&id, &resolved);
+        let service = build_iron_proxy_service(&id, &resolved, &sync.proxy_id);
         assert_eq!(
             service
                 .metadata
@@ -2437,6 +2472,15 @@ mod tests {
                 .and_then(|labels| labels.get(OBSERVABILITY_ENABLED_LABEL))
                 .map(String::as_str),
             Some("true")
+        );
+        assert_eq!(
+            service
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(IRON_CONTROL_PROXY_ID_ANNOTATION))
+                .map(String::as_str),
+            Some("iprx_test")
         );
         assert_eq!(
             service
@@ -2494,7 +2538,7 @@ mod tests {
         let pod_labels = pod.metadata.labels.as_ref().unwrap();
         assert!(!pod_labels.contains_key(OBSERVABILITY_ENABLED_LABEL));
 
-        let service = build_iron_proxy_service(&id, &resolved);
+        let service = build_iron_proxy_service(&id, &resolved, &sync.proxy_id);
         let service_labels = service.metadata.labels.as_ref().unwrap();
         assert!(!service_labels.contains_key(OBSERVABILITY_ENABLED_LABEL));
         let service_selector = service.spec.as_ref().unwrap().selector.as_ref().unwrap();

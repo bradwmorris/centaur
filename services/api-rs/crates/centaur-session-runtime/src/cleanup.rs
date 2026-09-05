@@ -8,6 +8,7 @@ use crate::{RuntimeContext, SessionRuntimeError, record_idle_pause};
 
 const COMPONENT_LABEL: &str = "centaur.ai/component";
 const WORKFLOW_RUN_COMPONENT: &str = "workflow-run";
+const ORPHANED_PROXY_LABEL: &str = "centaur.ai/orphaned-proxy";
 
 #[derive(Clone, Copy, Debug)]
 pub struct SessionSandboxCleanupConfig {
@@ -171,6 +172,13 @@ fn select_orphan_reap_candidates(
 }
 
 fn orphan_reap_eligible(sandbox: &ObservedSandbox, referenced: &BTreeSet<String>) -> bool {
+    if sandbox
+        .labels
+        .get(ORPHANED_PROXY_LABEL)
+        .is_some_and(|value| value == "true")
+    {
+        return true;
+    }
     if referenced.contains(sandbox.id.as_str()) {
         return false;
     }
@@ -198,6 +206,12 @@ mod tests {
             COMPONENT_LABEL.to_owned(),
             WORKFLOW_RUN_COMPONENT.to_owned(),
         )]))
+    }
+
+    fn orphaned_proxy_observed(id: &str) -> ObservedSandbox {
+        ObservedSandbox::new(SandboxId::new(id), "test", SandboxStatus::Running).with_labels(
+            BTreeMap::from([(ORPHANED_PROXY_LABEL.to_owned(), "true".to_owned())]),
+        )
     }
 
     fn referenced(ids: &[&str]) -> BTreeSet<String> {
@@ -230,6 +244,19 @@ mod tests {
             Vec::<String>::new()
         );
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn proxy_without_sandbox_is_reaped_after_two_passes_even_if_stale_assignment_references_it() {
+        let observed = [orphaned_proxy_observed("asbx-proxy-only")];
+        let referenced = referenced(&["asbx-proxy-only"]);
+        let mut pending = BTreeSet::new();
+
+        assert!(select_orphan_reap_candidates(&observed, &referenced, &mut pending).is_empty());
+        assert_eq!(
+            select_orphan_reap_candidates(&observed, &referenced, &mut pending),
+            vec!["asbx-proxy-only".to_owned()]
+        );
     }
 
     #[test]

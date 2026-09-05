@@ -2877,6 +2877,14 @@ impl SessionRuntime {
                                             }),
                                         )
                                         .await?;
+                                    retire_replaced_sandbox(
+                                        &self.context(),
+                                        thread_key,
+                                        execution_id,
+                                        sandbox_id,
+                                        "resume_failed",
+                                    )
+                                    .await?;
                                 }
                                 Err(error) => return Err(error),
                             }
@@ -2891,6 +2899,14 @@ impl SessionRuntime {
                                 status = ?status,
                                 "existing sandbox is not reusable"
                             );
+                            retire_replaced_sandbox(
+                                &self.context(),
+                                thread_key,
+                                execution_id,
+                                sandbox_id,
+                                "not_reusable",
+                            )
+                            .await?;
                         }
                     },
                     Err(SandboxError::NotFound(_)) => {
@@ -5456,12 +5472,31 @@ async fn record_idle_pause(
 
     let id = SandboxId::new(sandbox_id);
     match ctx.manager.status(&id).await {
-        Ok(SandboxStatus::Suspended | SandboxStatus::Stopped | SandboxStatus::Gone) => {
-            return Ok(());
+        Ok(SandboxStatus::Suspended) => return Ok(()),
+        Ok(SandboxStatus::Stopped | SandboxStatus::Gone) => {
+            return retire_terminal_idle_sandbox(
+                ctx,
+                thread_key,
+                execution_id,
+                sandbox_id,
+                idle_timeout,
+                false,
+            )
+            .await;
         }
         Ok(SandboxStatus::Running | SandboxStatus::Created) => {}
         Ok(SandboxStatus::Unknown(_)) => return Ok(()),
-        Err(SandboxError::NotFound(_)) => return Ok(()),
+        Err(SandboxError::NotFound(_)) => {
+            return retire_terminal_idle_sandbox(
+                ctx,
+                thread_key,
+                execution_id,
+                sandbox_id,
+                idle_timeout,
+                true,
+            )
+            .await;
+        }
         Err(error) => {
             record_idle_pause_failure(
                 &ctx.store,
@@ -5507,6 +5542,88 @@ async fn record_idle_pause(
             return Err(SessionRuntimeError::Sandbox(error));
         }
     }
+    Ok(())
+}
+
+async fn retire_terminal_idle_sandbox(
+    ctx: &RuntimeContext,
+    thread_key: &ThreadKey,
+    execution_id: &str,
+    sandbox_id: &str,
+    idle_timeout: Duration,
+    backend_missing: bool,
+) -> Result<(), SessionRuntimeError> {
+    ctx.sandbox_pipes.remove(sandbox_id);
+    if !backend_missing {
+        match ctx.manager.stop(&SandboxId::new(sandbox_id)).await {
+            Ok(()) | Err(SandboxError::NotFound(_)) => {}
+            Err(error) => {
+                record_idle_pause_failure(
+                    &ctx.store,
+                    thread_key,
+                    execution_id,
+                    sandbox_id,
+                    idle_timeout,
+                    &error.to_string(),
+                )
+                .await?;
+                return Err(SessionRuntimeError::Sandbox(error));
+            }
+        }
+    }
+    let cleared = ctx
+        .store
+        .clear_sandbox_id_if_matches(thread_key, sandbox_id)
+        .await?;
+    ctx.store
+        .append_event(
+            thread_key,
+            Some(execution_id),
+            "session.sandbox_stopped",
+            json!({
+                "execution_id": execution_id,
+                "thread_key": thread_key.as_str(),
+                "sandbox_id": sandbox_id,
+                "reason": "terminal_before_idle_cleanup",
+                "idle_timeout_ms": duration_millis_u64(idle_timeout),
+                "backend_missing": backend_missing,
+                "assignment_cleared": cleared,
+            }),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn retire_replaced_sandbox(
+    ctx: &RuntimeContext,
+    thread_key: &ThreadKey,
+    execution_id: &str,
+    sandbox_id: &str,
+    reason: &'static str,
+) -> Result<(), SessionRuntimeError> {
+    ctx.sandbox_pipes.remove(sandbox_id);
+    match ctx.manager.stop(&SandboxId::new(sandbox_id)).await {
+        Ok(()) | Err(SandboxError::NotFound(_)) => {}
+        Err(error) => return Err(SessionRuntimeError::Sandbox(error)),
+    }
+    let cleared = ctx
+        .store
+        .clear_sandbox_id_if_matches(thread_key, sandbox_id)
+        .await?;
+    ctx.store
+        .append_event(
+            thread_key,
+            Some(execution_id),
+            "session.sandbox_replaced",
+            json!({
+                "execution_id": execution_id,
+                "thread_key": thread_key.as_str(),
+                "sandbox_id": sandbox_id,
+                "reason": reason,
+                "assignment_cleared": cleared,
+            }),
+        )
+        .await?;
     Ok(())
 }
 
@@ -9381,6 +9498,182 @@ mod adoption_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_assignment_is_torn_down_before_replacement() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:stopped-replace-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_id(&thread_key, Some("sbx-stopped"))
+            .await
+            .expect("assign stopped sandbox");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Stopped, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        let sandbox_id = runtime
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::Codex,
+                persona_id: None,
+                existing_sandbox_id: Some("sbx-stopped"),
+                existing_sandbox_capabilities: None,
+                iron_control_principal: None,
+                requester_principal: None,
+                proxy_labels: &BTreeMap::new(),
+                desired_capabilities: &SessionSandboxCapabilities::default_enabled(),
+                execution_id: &execution_id,
+            })
+            .await
+            .expect("replace stopped sandbox");
+
+        assert_eq!(backend.stopped(), vec!["sbx-stopped".to_owned()]);
+        assert_eq!(sandbox_id, "mock-sbx");
+        assert_eq!(
+            store.get_session(&thread_key).await.unwrap().sandbox_id,
+            Some("mock-sbx".to_owned())
+        );
+        assert!(events(&store, &thread_key).await.iter().any(|event| {
+            event.event_type == "session.sandbox_replaced"
+                && event.payload.get("reason").and_then(Value::as_str) == Some("not_reusable")
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_cleanup_stops_terminal_sandbox_and_clears_assignment() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:terminal-idle-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_id(&thread_key, Some("sbx-terminal"))
+            .await
+            .expect("assign terminal sandbox");
+        let execution = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution;
+        store
+            .complete_execution(&execution.execution_id)
+            .await
+            .expect("complete execution");
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Stopped, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        record_idle_pause(
+            &runtime.context(),
+            &thread_key,
+            &execution.execution_id,
+            "sbx-terminal",
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("retire terminal sandbox");
+
+        assert_eq!(backend.stopped(), vec!["sbx-terminal".to_owned()]);
+        assert_eq!(
+            store.get_session(&thread_key).await.unwrap().sandbox_id,
+            None
+        );
+        assert!(events(&store, &thread_key).await.iter().any(|event| {
+            event.event_type == "session.sandbox_stopped"
+                && event.payload.get("reason").and_then(Value::as_str)
+                    == Some("terminal_before_idle_cleanup")
+                && event
+                    .payload
+                    .get("assignment_cleared")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_cleanup_does_not_clear_a_newer_assignment() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:terminal-race-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let execution = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create old execution")
+            .execution;
+        store
+            .update_sandbox_id(&thread_key, Some("sbx-new"))
+            .await
+            .expect("assign newer sandbox");
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Stopped, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        retire_terminal_idle_sandbox(
+            &runtime.context(),
+            &thread_key,
+            &execution.execution_id,
+            "sbx-old",
+            Duration::from_secs(30),
+            false,
+        )
+        .await
+        .expect("retire old terminal sandbox");
+
+        assert_eq!(backend.stopped(), vec!["sbx-old".to_owned()]);
+        assert_eq!(
+            store.get_session(&thread_key).await.unwrap().sandbox_id,
+            Some("sbx-new".to_owned())
+        );
+        assert!(events(&store, &thread_key).await.iter().any(|event| {
+            event.event_type == "session.sandbox_stopped"
+                && event
+                    .payload
+                    .get("assignment_cleared")
+                    .and_then(Value::as_bool)
+                    == Some(false)
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn non_default_capabilities_skip_warm_pool() {
         let Some(store) = test_store().await else {
             return;
@@ -10355,7 +10648,7 @@ mod adoption_tests {
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Suspended, Vec::new()));
         backend.fail_resume();
-        let runtime = runtime_with(&store, backend);
+        let runtime = runtime_with(&store, backend.clone());
         let sandbox_id = runtime
             .ensure_session_sandbox(EnsureSessionSandboxRequest {
                 thread_key: &thread_key,
@@ -10373,6 +10666,7 @@ mod adoption_tests {
             .expect("resume failure should fall through to replacement");
 
         assert_eq!(sandbox_id, "mock-sbx");
+        assert_eq!(backend.stopped(), vec!["sbx-old".to_owned()]);
         let session = store.get_session(&thread_key).await.unwrap();
         assert_eq!(session.sandbox_id, Some("mock-sbx".to_owned()));
         assert_eq!(

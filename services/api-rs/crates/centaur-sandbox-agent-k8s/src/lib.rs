@@ -3,7 +3,7 @@
 //! The Agent Sandbox CRD types are generated from the upstream CRD with
 //! `just codegen-agent-sandbox-crd`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,6 +39,8 @@ const DEFAULT_CONTAINER_NAME: &str = "agent";
 const MANAGED_BY_LABEL: &str = "centaur.ai/managed-by";
 const SANDBOX_ID_LABEL: &str = "centaur.ai/sandbox-id";
 const OBSERVABILITY_ENABLED_LABEL: &str = "centaur.ai/observability-enabled";
+const IRON_PROXY_LABEL: &str = "centaur.ai/iron-proxy";
+const ORPHANED_PROXY_LABEL: &str = "centaur.ai/orphaned-proxy";
 const MANAGED_BY_VALUE: &str = "api-rs";
 // iron-control principal OID the sandbox's proxy binds to, stamped at create
 // so resume (which has only the sandbox id) can rebind without the spec or any
@@ -445,12 +447,76 @@ impl SandboxBackend for AgentSandboxBackend {
             .await
             .map_err(|err| map_kube_error("list sandboxes", err))?;
         let mut observed = Vec::with_capacity(sandboxes.items.len());
+        let mut sandbox_ids = BTreeSet::new();
         for sandbox in sandboxes.items {
             let Some(name) = sandbox.metadata.name.clone() else {
                 continue;
             };
+            sandbox_ids.insert(name.clone());
             let id = SandboxId::new(name);
             observed.push(self.observed_from_sandbox(&id, &sandbox).await?);
+        }
+        // Proxy resources are created before their Sandbox CR so egress policy
+        // is in place before the agent pod starts. A control-plane crash in
+        // that narrow window can leave a proxy with no ownerReference and no
+        // Sandbox for the normal lifecycle to observe. Surface those resource
+        // sets as synthetic observations: the session cleanup worker requires
+        // two consecutive sightings before stop(), which protects an ordinary
+        // in-progress create while still making crash leftovers reclaimable.
+        let proxy_pods = self
+            .pods()
+            .list(&ListParams::default().labels(&format!("{IRON_PROXY_LABEL}=true")))
+            .await
+            .map_err(|err| map_kube_error("list iron-proxy pods for orphan detection", err))?;
+        let mut orphaned_proxy_ids = BTreeSet::new();
+        for proxy in proxy_pods.items {
+            let labels = proxy.metadata.labels.clone().unwrap_or_default();
+            let Some(sandbox_id) = labels.get(SANDBOX_ID_LABEL).cloned() else {
+                continue;
+            };
+            if sandbox_ids.contains(&sandbox_id) || !orphaned_proxy_ids.insert(sandbox_id.clone()) {
+                continue;
+            }
+            let mut labels = labels;
+            labels.insert(ORPHANED_PROXY_LABEL.to_owned(), "true".to_owned());
+            observed.push(
+                ObservedSandbox::new(sandbox_id, BACKEND_NAME, SandboxStatus::Running)
+                    .with_labels(labels)
+                    .with_created_at(
+                        proxy
+                            .metadata
+                            .creation_timestamp
+                            .as_ref()
+                            .map(|time| SystemTime::from(time.0)),
+                    ),
+            );
+        }
+        let proxy_services = self
+            .services()
+            .list(&ListParams::default().labels(&format!("{IRON_PROXY_LABEL}=true")))
+            .await
+            .map_err(|err| map_kube_error("list iron-proxy services for orphan detection", err))?;
+        for service in proxy_services.items {
+            let labels = service.metadata.labels.clone().unwrap_or_default();
+            let Some(sandbox_id) = labels.get(SANDBOX_ID_LABEL).cloned() else {
+                continue;
+            };
+            if sandbox_ids.contains(&sandbox_id) || !orphaned_proxy_ids.insert(sandbox_id.clone()) {
+                continue;
+            }
+            let mut labels = labels;
+            labels.insert(ORPHANED_PROXY_LABEL.to_owned(), "true".to_owned());
+            observed.push(
+                ObservedSandbox::new(sandbox_id, BACKEND_NAME, SandboxStatus::Running)
+                    .with_labels(labels)
+                    .with_created_at(
+                        service
+                            .metadata
+                            .creation_timestamp
+                            .as_ref()
+                            .map(|time| SystemTime::from(time.0)),
+                    ),
+            );
         }
         Ok(observed)
     }
