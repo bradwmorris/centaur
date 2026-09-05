@@ -15,7 +15,7 @@ function trace(): SlackbotV2Trace {
 }
 
 describe('interaction Run trace', () => {
-  test('captures safe tool facts and resulting Object IDs without arguments or output', () => {
+  test('captures sanitized tool arguments and output plus resulting Object IDs', () => {
     const run = trace()
     const collector = new InteractionRunTraceCollector(run)
     collector.capture({
@@ -27,7 +27,7 @@ describe('interaction Run trace', () => {
             id: 'tool-1',
             type: 'mcpToolCall',
             name: 'create_note',
-            arguments: { private_text: 'do not persist this' },
+            arguments: { query: 'find this', api_token: 'do not persist this' },
             result: {
               object_id: '00000000-0000-4000-8000-000000000123',
               content: 'also private'
@@ -44,7 +44,11 @@ describe('interaction Run trace', () => {
       name: 'create_note',
       status: 'completed'
     })
-    expect(JSON.stringify(run.runEntries![0])).not.toContain('private')
+    expect(run.runEntries![0]?.facts).toMatchObject({
+      arguments: { query: 'find this', api_token: '[REDACTED]' },
+      result: { object_id: '00000000-0000-4000-8000-000000000123', content: 'also private' }
+    })
+    expect(JSON.stringify(run.runEntries![0])).not.toContain('do not persist this')
     expect(collector.affectedObjectIds()).toEqual([
       '00000000-0000-4000-8000-000000000123'
     ])
@@ -61,6 +65,57 @@ describe('interaction Run trace', () => {
     }
     expect(run.runEntries).toHaveLength(1)
     expect(run.runEntries![0]?.status).toBe('completed')
+    expect(run.runEntries![0]?.created_at).toEqual(expect.any(String))
+    expect(run.runEntries![0]?.duration_ms).toEqual(expect.any(Number))
+  })
+
+  test('redacts credentials embedded in command strings', () => {
+    const run = trace()
+    const collector = new InteractionRunTraceCollector(run)
+    collector.capture({
+      eventKind: 'session.output.line',
+      data: JSON.stringify({ method: 'item/completed', params: { item: {
+        id: 'secret-command', type: 'commandExecution', command: 'client --token very-secret list'
+      } } })
+    })
+    expect(JSON.stringify(run.runEntries)).not.toContain('very-secret')
+    expect(JSON.stringify(run.runEntries)).toContain('[REDACTED]')
+  })
+
+  test('preserves token-count metadata while redacting actual tokens', () => {
+    const run = trace()
+    const collector = new InteractionRunTraceCollector(run)
+    collector.capture({
+      eventKind: 'session.output.line',
+      data: JSON.stringify({
+        method: 'centaur/inputSnapshot',
+        params: {
+          application_instructions: {
+            estimated_tokens: 321,
+            auth_token: 'do not persist this'
+          }
+        }
+      })
+    })
+
+    expect(run.runEntries?.[0]?.facts).toEqual({
+      application_instructions: {
+        estimated_tokens: 321,
+        auth_token: '[REDACTED]'
+      }
+    })
+  })
+
+  test('marks oversized tool output as truncated', () => {
+    const run = trace()
+    const collector = new InteractionRunTraceCollector(run)
+    collector.capture({
+      eventKind: 'session.output.line',
+      data: JSON.stringify({ method: 'item/completed', params: { item: {
+        id: 'large-output', type: 'commandExecution', output: 'x '.repeat(20_000)
+      } } })
+    })
+    expect((run.runEntries![0]?.facts as Record<string, string>).output).toContain('[truncated')
   })
 
   test('names Context CLI writes and captures Object IDs from JSON command output', () => {
@@ -86,10 +141,35 @@ describe('interaction Run trace', () => {
       name: 'centaur-context create-note',
       status: 'completed'
     })
-    expect(JSON.stringify(run.runEntries![0])).not.toContain('private')
+    expect(run.runEntries![0]?.facts).toMatchObject({
+      command: "/bin/bash -lc 'centaur-context create-note test --description context'",
+      output: expect.stringContaining('private')
+    })
     expect(collector.affectedObjectIds()).toEqual([
       '00000000-0000-4000-8000-000000000456'
     ])
+  })
+
+  test('captures the exact composed instruction snapshot from the harness', () => {
+    const run = trace()
+    const collector = new InteractionRunTraceCollector(run)
+    collector.capture({
+      eventKind: 'session.output.line',
+      data: JSON.stringify({
+        method: 'centaur/inputSnapshot',
+        params: {
+          application_instructions: { sha256: 'abc', text: '# Agent instructions' },
+          provider_instructions: { status: 'unavailable' }
+        }
+      })
+    })
+    expect(run.runEntries![0]).toMatchObject({
+      entry_type: 'instruction_snapshot',
+      facts: {
+        application_instructions: { sha256: 'abc', text: '# Agent instructions' },
+        provider_instructions: { status: 'unavailable' }
+      }
+    })
   })
 
   test('names Context CLI reads without treating returned Objects as affected', () => {

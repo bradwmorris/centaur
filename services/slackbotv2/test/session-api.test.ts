@@ -658,6 +658,36 @@ describe('forwardToSessionApi overrides', () => {
     expect(line.message.content.at(-1)).toEqual({ type: 'text', text: 'review this' })
   })
 
+  test('records the exact application-controlled input components before execution', async () => {
+    const { fetchFn } = fakeApi()
+    const runTrace: NonNullable<ForwardSessionInput['trace']> = {
+      includeContext: true,
+      messageId: '1700000000.000100',
+      mode: 'execute',
+      openStream: false,
+      startedAtMs: 1,
+      threadId: 'slack:C1:1700000000.000100',
+      runEntries: []
+    }
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('review this'), {
+        sharedContextPreamble: '# Centaur Context\nRelevant memory',
+        trace: runTrace
+      })
+    )
+    const snapshot = runTrace.runEntries?.find(entry => entry.entry_type === 'input_snapshot')
+    expect(snapshot).toMatchObject({
+      entry_type: 'input_snapshot',
+      facts: {
+        components: expect.arrayContaining([
+          expect.objectContaining({ kind: 'retrieved_context', sha256: expect.any(String), text: '# Centaur Context\nRelevant memory' }),
+          expect.objectContaining({ kind: 'message_text', sha256: expect.any(String), text: 'review this' })
+        ])
+      }
+    })
+  })
+
   test('omits model field when no override is set', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))

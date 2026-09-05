@@ -1,6 +1,8 @@
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import { isRetryableCodexErrorNotification } from '@centaur/rendering'
 import type { Attachment, LinkPreview, Message } from 'chat'
+import { createHash } from 'node:crypto'
+import { appendRunTrace } from './run-trace'
 import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
 import type {
   ForwardSessionInput,
@@ -535,7 +537,8 @@ export async function forwardToSessionApi(
       input.provider,
       input.metadataModel,
       input.metadataHarnessType,
-      input.harnessAssignment
+      input.harnessAssignment,
+      input.trace
     ),
     sessionApiTimeoutMs(options),
     'execute session'
@@ -1341,12 +1344,26 @@ async function executeSession(
   provider?: string,
   metadataModel?: string,
   metadataHarnessType?: string,
-  harnessAssignment?: SlackbotV2HarnessAssignment
+  harnessAssignment?: SlackbotV2HarnessAssignment,
+  trace?: ForwardSessionInput['trace']
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
   const requesterIdentity = await resolveRequesterIdentity(options, message)
   const idleTimeoutMs = sessionIdleTimeoutMs(options)
   const recordedModel = metadataModel ?? model
+  const inputLines = toCodexInputLines(
+    options,
+    message,
+    threadId,
+    model,
+    requesterIdentity,
+    contextMessages,
+    contextPreamble,
+    sharedContextPreamble,
+    reasoning,
+    provider
+  )
+  recordAgentInputSnapshot(trace, message.id, inputLines)
   const body: SlackbotV2ExecuteSessionRequest = {
     idempotency_key: message.id,
     // Record the model this execution runs on (explicit override, else the
@@ -1366,18 +1383,7 @@ async function executeSession(
       },
       requesterIdentity
     ),
-    input_lines: toCodexInputLines(
-      options,
-      message,
-      threadId,
-      model,
-      requesterIdentity,
-      contextMessages,
-      contextPreamble,
-      sharedContextPreamble,
-      reasoning,
-      provider
-    ),
+    input_lines: inputLines,
     idle_timeout_ms: idleTimeoutMs,
     ...(options.maxDurationMs === undefined ? {} : { max_duration_ms: options.maxDurationMs })
   }
@@ -1394,6 +1400,62 @@ async function executeSession(
   )
   await ensureApiOk(response, 'execute session')
   return (await response.json()) as SlackbotV2ExecuteSessionResponse
+}
+
+function recordAgentInputSnapshot(
+  trace: ForwardSessionInput['trace'],
+  messageId: string,
+  inputLines: string[]
+): void {
+  if (!trace) return
+  const finalLine = inputLines.at(-1)
+  if (!finalLine) return
+  const parsed = JSON.parse(finalLine) as JsonObject
+  const message = isJsonObject(parsed.message) ? parsed.message : undefined
+  const content = Array.isArray(message?.content) ? message.content : []
+  const components: JsonObject[] = []
+  for (const [index, part] of content.entries()) {
+    if (!isJsonObject(part)) continue
+    const partText = typeof part.text === 'string' ? part.text : undefined
+    if (partText !== undefined) {
+      components.push({
+        chars: partText.length,
+        estimated_tokens: Math.ceil(partText.length / 4),
+        kind: inputComponentKind(partText, index),
+        sha256: createHash('sha256').update(partText).digest('hex'),
+        text: partText
+      })
+      continue
+    }
+    components.push({
+      kind: 'attachment',
+      mime_type: typeof part.mimeType === 'string' ? part.mimeType : null,
+      name: typeof part.name === 'string' ? part.name : null,
+      size: typeof part.size === 'number' ? part.size : null,
+      staged: typeof part.attachmentId === 'string'
+    })
+  }
+  appendRunTrace(trace, {
+    id: `${messageId}:agent-input`,
+    entry_type: 'input_snapshot',
+    name: 'agent turn input',
+    status: 'completed',
+    component: 'slackbotv2',
+    facts: {
+      components,
+      description: 'Exact application-controlled text sent as this user turn, before provider processing.',
+      staged_attachment_count: Math.max(0, inputLines.length - 1)
+    }
+  })
+}
+
+function inputComponentKind(value: string, index: number): string {
+  if (value.startsWith('# Slack Session Context')) return 'slack_session_context'
+  if (value.startsWith('# Requester Context')) return 'requester_context'
+  if (value.startsWith('# Centaur Context')) return 'retrieved_context'
+  if (value.startsWith('# Slack Thread Context')) return 'slack_thread_context'
+  if (value.startsWith('This Slack thread was just restarted')) return 'restart_context'
+  return index === 0 ? 'user_message' : 'message_text'
 }
 
 async function postInterruptSessionExecution(

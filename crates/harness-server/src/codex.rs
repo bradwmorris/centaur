@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::otel::{TurnStatus as TelemetryTurnStatus, TurnTelemetry};
 use crate::server::{
     BlocksCommand, BlocksState, parse_blocks_line_with_state, usage_span_input_value,
-    write_blocks_error,
+    write_blocks_error, write_instruction_snapshot,
 };
 use crate::util::write_value;
 use crate::{AppServerRuntime, HarnessServerError, Result};
@@ -212,6 +212,7 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 );
                 turn_active.store(true, Ordering::SeqCst);
                 let result = (|| -> Result<()> {
+                    write_instruction_snapshot(&mut stdout)?;
                     if codex.is_none() {
                         let mut child = CodexJsonRpcChild::spawn()?;
                         initialize_codex(
