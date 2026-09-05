@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 import compose_system_prompt
@@ -26,16 +27,25 @@ class ComposeSystemPromptTest(unittest.TestCase):
             second.write_text("second overlay\n")
 
             target = workspace / "AGENTS.md"
+            manifest = workspace / ".centaur-instructions.json"
             compose_system_prompt.compose_system_prompt(
                 home_dir=home,
                 target_prompt=target,
                 repo_mount=repo_mount,
+                manifest_path=manifest,
             )
 
             self.assertEqual(
                 target.read_text(),
                 "base\n\n\n---\n\nfirst overlay\n\n\n---\n\nsecond overlay\n",
             )
+            captured = json.loads(manifest.read_text())
+            self.assertEqual(
+                [component["kind"] for component in captured["components"]],
+                ["base", "repository_overlay", "repository_overlay"],
+            )
+            self.assertEqual(captured["components"][0]["text"], "base\n")
+            self.assertEqual(len(captured["components"][0]["sha256"]), 64)
 
     def test_uses_agents_base_and_appends_home_overlay_before_repo_overlays(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

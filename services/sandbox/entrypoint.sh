@@ -437,7 +437,8 @@ unset _centaur_tools_auto_reload
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
 # Prompt overlays from mounted repos are appended when present.
 TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
-compose-system-prompt --home-dir "$HOME_DIR" --target-prompt "$TARGET_PROMPT"
+PROMPT_MANIFEST="$WORKSPACE_DIR/.centaur-instructions.json"
+compose-system-prompt --home-dir "$HOME_DIR" --target-prompt "$TARGET_PROMPT" --manifest "$PROMPT_MANIFEST"
 
 if [ "${CENTAUR_SANDBOX_OBSERVABILITY_ENABLED:-true}" = "false" ] && [ -f "$TARGET_PROMPT" ]; then
     cat >> "$TARGET_PROMPT" <<'EOF'

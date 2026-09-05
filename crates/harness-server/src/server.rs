@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::env;
-use std::fs::OpenOptions;
+use std::fs::{OpenOptions, read_to_string};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -25,6 +25,7 @@ use image::imageops::FilterType;
 use image::{DynamicImage, ImageError};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::amp::AmpHarness;
@@ -155,6 +156,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 if let Some(model) = model {
                     state.model = model;
                 }
+                write_instruction_snapshot(&mut stdout)?;
                 let result = run_blocks_turn(
                     harness,
                     &mut state,
@@ -1560,6 +1562,72 @@ pub(crate) fn write_blocks_error<W: Write>(
     )
 }
 
+pub(crate) fn write_instruction_snapshot<W: Write>(stdout: &mut W) -> Result<()> {
+    let directory = env::current_dir()?;
+    write_value(stdout, &instruction_snapshot_value(&directory))
+}
+
+fn instruction_snapshot_value(directory: &Path) -> Value {
+    let prompt = read_to_string(directory.join("AGENTS.md")).ok();
+    let manifest = read_to_string(directory.join(".centaur-instructions.json"))
+        .ok()
+        .and_then(|value| serde_json::from_str::<Value>(&value).ok());
+    let application_instructions = prompt.map_or_else(
+        || json!({ "status": "unavailable", "reason": "AGENTS.md was not present" }),
+        |text| {
+            let sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+            json!({
+                "status": "captured",
+                "source": "workspace/AGENTS.md",
+                "sha256": sha256,
+                "chars": text.chars().count(),
+                "estimated_tokens": text.chars().count().div_ceil(4),
+                "text": text,
+                "composition": manifest
+            })
+        },
+    );
+    let tool_catalogue_path = env::var_os("CENTAUR_TOOL_BIN_DIR")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/bin")))
+        .map(|directory| directory.join(".centaur-tools.json"));
+    let tool_catalogue = tool_catalogue_path.as_deref().map_or_else(
+        || json!({ "status": "unavailable", "reason": "The application tool catalogue path was unavailable." }),
+        application_tool_catalogue_value,
+    );
+    json!({
+        "method": "centaur/inputSnapshot",
+        "params": {
+            "application_instructions": application_instructions,
+            "provider_instructions": {
+                "status": "unavailable",
+                "reason": "Provider-controlled hidden instructions are not exposed to Centaur."
+            },
+            "tool_catalogue": {
+                "application": tool_catalogue,
+                "provider": {
+                    "status": "unavailable",
+                    "reason": "Provider-managed built-in tool definitions are not exposed to the harness before execution."
+                }
+            }
+        }
+    })
+}
+
+fn application_tool_catalogue_value(path: &Path) -> Value {
+    read_to_string(path).map_or_else(
+        |_| json!({ "status": "unavailable", "reason": "No application tool catalogue was present before execution." }),
+        |text| json!({
+            "status": "captured",
+            "source": path.display().to_string(),
+            "sha256": format!("{:x}", Sha256::digest(text.as_bytes())),
+            "chars": text.chars().count(),
+            "estimated_tokens": text.chars().count().div_ceil(4),
+            "text": text
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1571,6 +1639,50 @@ mod tests {
             env::set_var("CENTAUR_UPLOADS_DIR", &path);
         }
         path
+    }
+
+    #[test]
+    fn instruction_snapshot_preserves_exact_composed_prompt_and_manifest() {
+        let directory = env::temp_dir().join(format!("instructions-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("creates fixture");
+        std::fs::write(directory.join("AGENTS.md"), "base\n---\npersona\n").expect("writes prompt");
+        std::fs::write(
+            directory.join(".centaur-instructions.json"),
+            r#"{"version":1,"components":[{"kind":"persona_or_base","text":"base"}]}"#,
+        )
+        .expect("writes manifest");
+        let value = instruction_snapshot_value(&directory);
+        assert_eq!(
+            value.pointer("/params/application_instructions/text"),
+            Some(&json!("base\n---\npersona\n"))
+        );
+        assert_eq!(
+            value.pointer("/params/application_instructions/composition/components/0/kind"),
+            Some(&json!("persona_or_base"))
+        );
+        assert_eq!(
+            value.pointer("/params/provider_instructions/status"),
+            Some(&json!("unavailable"))
+        );
+        std::fs::remove_dir_all(directory).expect("removes fixture");
+    }
+
+    #[test]
+    fn application_tool_catalogue_preserves_exact_execution_time_catalogue() {
+        let directory = env::temp_dir().join(format!("tools-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("creates fixture");
+        let path = directory.join(".centaur-tools.json");
+        std::fs::write(&path, "[{\"name\":\"company_context\"}]\n").expect("writes catalogue");
+
+        let value = application_tool_catalogue_value(&path);
+
+        assert_eq!(value.pointer("/status"), Some(&json!("captured")));
+        assert_eq!(
+            value.pointer("/text"),
+            Some(&json!("[{\"name\":\"company_context\"}]\n"))
+        );
+        assert!(value.pointer("/sha256").and_then(Value::as_str).is_some());
+        std::fs::remove_dir_all(directory).expect("removes fixture");
     }
 
     fn write_gradient_png(dir: &Path, name: &str, width: u32, height: u32) -> PathBuf {

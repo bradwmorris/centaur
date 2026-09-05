@@ -1281,6 +1281,7 @@ async function syncThreadMessageToSession(
         facts: {
           description: 'Relevant Context Objects were retrieved.',
           object_count: sharedContext.objectCount,
+          packet: sharedContext.snapshot,
           truncated: sharedContext.truncated
         }
       })
