@@ -91,6 +91,9 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     }
     runtime = runtime.with_sandbox_reaper(args.sandbox_reaper_config());
     runtime = runtime.with_sandbox_cleanup(args.sandbox_cleanup_config());
+    if let Some(config) = args.session_event_retention_config() {
+        runtime = runtime.with_session_event_retention(config);
+    }
     let workflow_host_sandbox = args
         .workflow_host_sandbox_runtime(&iron_control.workflow_host_principal)
         .await?;
@@ -182,6 +185,8 @@ pub(crate) enum ServerError {
     KubeInferConfig(#[from] kube::config::InferConfigError),
     #[error(transparent)]
     Kube(#[from] kube::Error),
+    #[error(transparent)]
+    Sandbox(#[from] centaur_sandbox_core::SandboxError),
     #[error(transparent)]
     IronProxy(#[from] centaur_iron_proxy::IronProxyConfigError),
     #[error(transparent)]

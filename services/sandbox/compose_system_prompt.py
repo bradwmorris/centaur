@@ -10,14 +10,16 @@ from pathlib import Path
 
 SEPARATOR = "\n\n---\n\n"
 OVERLAY_PROMPT = Path("services/sandbox/SYSTEM_PROMPT.md")
+PERSONA_PROMPT = Path("AGENTS_PERSONA.md")
+OBSERVABILITY_DISABLED_PROMPT = """[Observability access]
+This sandbox does not have Centaur observability access. Do not use vlogs, vmetrics, Grafana, or related internal logs/metrics tools.
+"""
 
 
-def _append_prompt(target: Path, source: Path) -> bool:
-    if not source.is_file() or not target.is_file():
+def _append_file_fragment(fragments: list[str], source: Path) -> bool:
+    if not source.is_file():
         return False
-    with target.open("a") as target_file:
-        target_file.write(SEPARATOR)
-        target_file.write(source.read_text())
+    fragments.append(source.read_text())
     return True
 
 
@@ -38,21 +40,25 @@ def compose_system_prompt(
     target_prompt: Path,
     repo_mount: Path,
     manifest_path: Path | None = None,
+    observability_enabled: bool = True,
 ) -> None:
     base_prompt = home_dir / "AGENTS_BASE.md"
     baked_prompt = home_dir / "AGENTS.md"
-    components: list[dict[str, object]] = []
-    if base_prompt.is_file():
-        _write_base(target_prompt, base_prompt, "persona_or_base", components)
-    elif baked_prompt.is_file():
-        _write_base(target_prompt, baked_prompt, "base", components)
-    else:
+    selected_base = base_prompt if base_prompt.is_file() else baked_prompt
+    if not selected_base.is_file():
         return
 
+    components: list[dict[str, object]] = [
+        _component(
+            "persona_or_base" if base_prompt.is_file() else "base",
+            selected_base,
+        )
+    ]
+    fragments = [selected_base.read_text()]
     appended: set[Path] = set()
 
     home_overlay = home_dir / "AGENTS_OVERLAY.md"
-    if _append_prompt(target_prompt, home_overlay):
+    if _append_file_fragment(fragments, home_overlay):
         appended.add(home_overlay.resolve())
         components.append(_component("home_overlay", home_overlay))
 
@@ -62,29 +68,35 @@ def compose_system_prompt(
         resolved = prompt_path.resolve()
         if resolved in appended:
             continue
-        if _append_prompt(target_prompt, prompt_path):
+        if _append_file_fragment(fragments, prompt_path):
             appended.add(resolved)
             components.append(_component("repository_overlay", prompt_path))
 
+    persona_prompt_path = home_dir / PERSONA_PROMPT
+    if _append_file_fragment(fragments, persona_prompt_path):
+        components.append(_component("persona", persona_prompt_path))
+
+    if not observability_enabled:
+        fragments.append(OBSERVABILITY_DISABLED_PROMPT)
+        components.append(_text_component("runtime_restriction", OBSERVABILITY_DISABLED_PROMPT))
+
+    effective_prompt = SEPARATOR.join(fragments)
+    target_prompt.write_text(effective_prompt)
+
     if manifest_path is not None:
-        manifest_path.write_text(json.dumps({
-            "version": 1,
-            "components": components,
-            "persona": {
-                "id": os.environ.get("CENTAUR_PERSONA_ID"),
-                "source": "AGENTS_BASE.md" if base_prompt.is_file() else None,
-            },
-        }, separators=(",", ":")))
-
-
-def _write_base(
-    target: Path,
-    source: Path,
-    kind: str,
-    components: list[dict[str, object]],
-) -> None:
-    target.write_text(source.read_text())
-    components.append(_component(kind, source))
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "components": components,
+                    "persona": {
+                        "id": os.environ.get("CENTAUR_PERSONA_ID"),
+                        "source": "AGENTS_BASE.md" if base_prompt.is_file() else None,
+                    },
+                },
+                separators=(",", ":"),
+            )
+        )
 
 
 def _component(kind: str, source: Path) -> dict[str, object]:
@@ -92,6 +104,17 @@ def _component(kind: str, source: Path) -> dict[str, object]:
     return {
         "kind": kind,
         "source": str(source),
+        "sha256": hashlib.sha256(text.encode()).hexdigest(),
+        "chars": len(text),
+        "estimated_tokens": (len(text) + 3) // 4,
+        "text": text,
+    }
+
+
+def _text_component(kind: str, text: str) -> dict[str, object]:
+    return {
+        "kind": kind,
+        "source": "runtime",
         "sha256": hashlib.sha256(text.encode()).hexdigest(),
         "chars": len(text),
         "estimated_tokens": (len(text) + 3) // 4,
@@ -113,6 +136,10 @@ def main() -> int:
         target_prompt=Path(args.target_prompt),
         repo_mount=Path(args.repo_mount) if args.repo_mount else home_dir / "github",
         manifest_path=Path(args.manifest) if args.manifest else None,
+        observability_enabled=os.environ.get(
+            "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED", "true"
+        ).lower()
+        != "false",
     )
     return 0
 
