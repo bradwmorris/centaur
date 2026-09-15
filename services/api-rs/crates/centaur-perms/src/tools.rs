@@ -44,6 +44,11 @@ const HMAC_ALGORITHMS: &[&str] = &["sha256", "sha512", "sha1"];
 const HMAC_KEY_ENCODINGS: &[&str] = &["raw", "base64", "hex"];
 const HMAC_OUTPUT_ENCODINGS: &[&str] = &["base64", "hex"];
 const HMAC_TIMESTAMP_FORMATS: &[&str] = &["unix_seconds", "unix_millis", "unix_nanos", "rfc3339"];
+// Keep this in step with Console RequestRule::HTTP_METHODS. The wildcard is
+// deliberately excluded for operator-managed signing secrets.
+const HMAC_HTTP_METHODS: &[&str] = &[
+    "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT",
+];
 /// The required `credentials` entry: the HMAC key. Other keys are user-named
 /// and only referenced from `headers[].value` templates.
 const HMAC_REQUIRED_CREDENTIAL: &str = "secret";
@@ -779,10 +784,10 @@ fn parse_hmac(table: &toml::Table, name: &str) -> Result<HmacSignSecret> {
             })?;
             if methods
                 .iter()
-                .any(|method| !method.bytes().all(|byte| byte.is_ascii_uppercase()))
+                .any(|method| !HMAC_HTTP_METHODS.contains(&method.as_str()))
             {
                 bail!(
-                    "hmac_sign entry {name:?} 'http_methods' must contain uppercase HTTP methods"
+                    "hmac_sign entry {name:?} 'http_methods' must contain supported uppercase HTTP methods"
                 );
             }
             methods
