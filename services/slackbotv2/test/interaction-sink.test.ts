@@ -228,7 +228,7 @@ describe('Slack interaction sink envelope', () => {
         interactionSink: {
           url: 'http://context.test/ingest',
           token: 'i'.repeat(32),
-          profileTtlMs: 2,
+          profileTtlMs: 250,
           botIdentity: {
             displayName: 'Ed (enyu editor)',
             avatarAsset: { sha256: 'a'.repeat(64), filename: 'ed.png' }
@@ -252,7 +252,7 @@ describe('Slack interaction sink envelope', () => {
       expect(profileCalls).toBe(2)
       await sendSlackInteractionSnapshot(options, currentMessage())
       expect(profileCalls).toBe(2)
-      await Bun.sleep(5)
+      await Bun.sleep(300)
       failProfiles = true
       await sendSlackInteractionSnapshot(options, currentMessage())
       expect(profileCalls).toBe(4)
