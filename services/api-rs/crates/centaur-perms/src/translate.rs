@@ -345,7 +345,16 @@ fn hmac_input(
             })
             .collect(),
         credentials: field_sources(&hmac.credentials, policy),
-        rules: rules_from_hosts(&hmac.hosts),
+        rules: hmac
+            .hosts
+            .iter()
+            .map(|host| RequestRule {
+                host: Some(host.clone()),
+                http_methods: hmac.http_methods.clone(),
+                paths: hmac.paths.clone(),
+                ..RequestRule::default()
+            })
+            .collect(),
     }
 }
 

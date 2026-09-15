@@ -144,7 +144,10 @@ pub fn discover_tool_proxy_fragment(
     for tool in &tools {
         secrets.extend(tool.secrets.iter().cloned());
     }
-    let secret_count = secrets.len();
+    let secret_count = secrets
+        .iter()
+        .filter(|secret| !matches!(secret, ToolSecret::OperatorHmac(_)))
+        .count();
     let fragment = fragment_from_secrets(secrets)?;
     info!(
         tool_dirs = ?tool_dirs,
@@ -599,6 +602,10 @@ fn load_tool_meta(
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ToolSecret {
     Http(HttpSecret),
+    /// Operator-managed by centaur-perms. Discovery validates the declaration
+    /// for the catalog but must not duplicate the signing transform in a
+    /// proxy fragment or expose its key in a sandbox.
+    OperatorHmac(String),
     OAuthToken(OAuthTokenSecret),
     GcpAuth(GcpAuthSecret),
     GcpIdToken(GcpIdTokenSecret),
@@ -759,7 +766,17 @@ fn parse_secret(
         "gcp_id_token" => parse_gcp_id_token_secret(table, name, secret_ref, labels),
         "pg_dsn" => parse_pg_dsn_secret(table, name, secret_ref, labels),
         "aws_auth" => parse_aws_auth_secret(table, name, labels),
-        "brokered_token" | "hmac_sign" => Err(ToolDiscoveryError::Invalid(format!(
+        "hmac_sign" => {
+            match centaur_perms::tools::parse_secret(value, default_hosts).map_err(|error| {
+                ToolDiscoveryError::Invalid(format!("invalid hmac_sign secret {name:?}: {error}"))
+            })? {
+                centaur_perms::tools::ParsedSecret::Hmac(_) => Ok(ToolSecret::OperatorHmac(name)),
+                _ => Err(ToolDiscoveryError::Invalid(
+                    "hmac_sign parser returned another secret type".to_owned(),
+                )),
+            }
+        }
+        "brokered_token" => Err(ToolDiscoveryError::Invalid(format!(
             "api-rs iron-control tool discovery does not yet support secret type {:?}",
             optional_str(table, "type").unwrap_or("unknown")
         ))),
@@ -1895,6 +1912,40 @@ secrets = [
         let placeholders =
             centaur_iron_proxy::placeholder_env(std::slice::from_ref(&discovered.fragment));
         assert!(placeholders.is_empty());
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn discovers_operator_managed_hmac_tool_without_unsigned_proxy_fragment() {
+        let temp = temp_dir("api-rs-tools-hmac");
+        let base = temp.join("base");
+        write_tool(
+            &base.join("signed_trigger"),
+            r#"
+[project]
+name = "signed-trigger"
+description = "Signed workflow trigger"
+
+[project.scripts]
+signed-trigger = "client:_cli"
+
+[tool.centaur]
+module = "client.py"
+secrets = [
+  { type = "hmac_sign", name = "TRIGGER_SIGNATURE", hosts = ["api.internal.test"], http_methods = ["POST"], paths = ["/api/webhooks/trigger"], algorithm = "sha256", key_encoding = "raw", output_encoding = "hex", timestamp_format = "unix_seconds", message = "{{.Body}}", credentials = { secret = "TRIGGER_WEBHOOK_TOKEN" }, headers = [{ name = "X-Trigger-Signature", value = "sha256={{.Signature}}" }] },
+]
+"#,
+        );
+
+        let catalog = discover_tool_catalog(std::slice::from_ref(&base)).unwrap();
+        assert_eq!(catalog.tools.len(), 1);
+        assert_eq!(catalog.tools[0].name, "signed-trigger");
+        let discovered = discover_tool_proxy_fragment(std::slice::from_ref(&base)).unwrap();
+        assert_eq!(discovered.tool_count, 1);
+        assert_eq!(discovered.secret_count, 0);
+        assert!(discovered.fragment.transforms.is_empty());
+        assert!(centaur_iron_proxy::placeholder_env(&[discovered.fragment]).is_empty());
 
         let _ = fs::remove_dir_all(temp);
     }
