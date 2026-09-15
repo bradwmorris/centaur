@@ -34,7 +34,8 @@ use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
 use centaur_session_runtime::{
-    PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionSandboxCleanupConfig,
+    PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionEventRetentionConfig,
+    SessionSandboxCleanupConfig,
 };
 use centaur_workflows::{WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
@@ -64,6 +65,8 @@ pub(crate) struct Args {
     pub(crate) server: ServerArgs,
     #[command(flatten)]
     sandbox: SandboxArgs,
+    #[command(flatten)]
+    session_event_retention: SessionEventRetentionArgs,
     #[command(flatten)]
     activity_summary: ActivitySummaryArgs,
 }
@@ -99,6 +102,10 @@ impl Args {
 
     pub(crate) fn sandbox_cleanup_config(&self) -> SessionSandboxCleanupConfig {
         self.sandbox.sandbox_cleanup_config()
+    }
+
+    pub(crate) fn session_event_retention_config(&self) -> Option<SessionEventRetentionConfig> {
+        self.session_event_retention.config()
     }
 
     pub(crate) async fn workflow_host_sandbox_runtime(
@@ -191,6 +198,48 @@ struct ActivitySummaryArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     max_output_tokens: u64,
+    /// Reasoning effort for the summary call. Empty omits the parameter, for a
+    /// server that rejects it. Left unset, a server that resolves an absent
+    /// effort to its highest level burns the whole output budget reasoning and
+    /// returns no message.
+    #[arg(
+        long = "session-activity-summary-reasoning-effort",
+        env = "SESSION_ACTIVITY_SUMMARY_REASONING_EFFORT",
+        default_value = "low"
+    )]
+    reasoning_effort: String,
+}
+
+#[derive(Debug, ClapArgs)]
+struct SessionEventRetentionArgs {
+    /// Delete session.output.line events older than this many days, once their
+    /// execution also completed before the cutoff. Other event types are
+    /// preserved. Accepts 0 through 3650; 0 disables retention (the default).
+    /// Events without an execution expire by event age alone.
+    /// Requires the manually installed session_events_stdout_created_at_idx index.
+    #[arg(
+        long = "session-events-retention-days",
+        env = "SESSION_EVENTS_RETENTION_DAYS",
+        default_value_t = 0,
+        value_parser = clap::value_parser!(u32).range(0..=3650)
+    )]
+    retention_days: u32,
+    #[arg(
+        long = "session-events-retention-sweep-interval-secs",
+        env = "SESSION_EVENTS_RETENTION_SWEEP_INTERVAL_SECS",
+        default_value_t = 300,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    sweep_interval_secs: u64,
+}
+
+impl SessionEventRetentionArgs {
+    fn config(&self) -> Option<SessionEventRetentionConfig> {
+        (self.retention_days > 0).then(|| SessionEventRetentionConfig {
+            interval: Duration::from_secs(self.sweep_interval_secs),
+            retention: Duration::from_secs(u64::from(self.retention_days) * 24 * 60 * 60),
+        })
+    }
 }
 
 impl ActivitySummaryArgs {
@@ -215,6 +264,7 @@ impl ActivitySummaryArgs {
             max_output_tokens: u16::try_from(self.max_output_tokens).unwrap_or(u16::MAX),
             min_interval: Duration::from_secs(self.min_interval_secs),
             model: self.model.clone(),
+            reasoning_effort: clean_optional_value(Some(self.reasoning_effort.as_str())),
             timeout: Duration::from_secs(self.timeout_secs),
         })
     }
@@ -634,6 +684,15 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     sandbox_reap_interval_secs: u64,
+    /// Minimum age of an iron-proxy resource whose Sandbox no longer exists
+    /// before the orphan sweep may delete it.
+    #[arg(
+        long = "session-sandbox-orphan-sweep-grace-secs",
+        env = "SESSION_SANDBOX_ORPHAN_SWEEP_GRACE_SECS",
+        default_value_t = 600,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    sandbox_orphan_sweep_grace_secs: u64,
     #[arg(
         long = "session-sandbox-cleanup-interval-secs",
         env = "SESSION_SANDBOX_CLEANUP_INTERVAL_SECS",
@@ -704,6 +763,13 @@ struct SandboxArgs {
         env = "SESSION_SANDBOX_RUNTIME_CLASS_NAME"
     )]
     runtime_class_name: Option<String>,
+    /// `serviceAccountName` for sandbox pods, e.g. for cloud workload
+    /// identity. The chart renders `sandbox.serviceAccountName` into this.
+    #[arg(
+        long = "session-sandbox-service-account-name",
+        env = "SESSION_SANDBOX_SERVICE_ACCOUNT_NAME"
+    )]
+    service_account_name: Option<String>,
     /// `priorityClassName` for sandbox and iron-proxy pods. Giving sandbox
     /// workloads a dedicated (low) PriorityClass lets the cluster scope a
     /// ResourceQuota to them and evict/preempt them before the control plane.
@@ -926,14 +992,25 @@ impl SandboxArgs {
                 self.local_workload_mode()?,
             )),
             SandboxBackendKind::AgentK8s => {
-                let backend = AgentSandboxBackend::new(
+                let backend = Arc::new(AgentSandboxBackend::new(
                     self.kube_client().await?,
                     AgentSandboxConfig::try_from(self)?,
-                );
-                Ok(SandboxRuntime::backend_with_workload(
-                    Arc::new(backend),
-                    self.container_workload_mode()?,
-                ))
+                ));
+                let stopped = backend.drain_service_account_mismatches().await?;
+                if !stopped.is_empty() {
+                    info!(
+                        stopped_count = stopped.len(),
+                        "drained sandboxes with stale service accounts before enabling reuse"
+                    );
+                }
+                let artifact_backend = backend.clone();
+                Ok(
+                    SandboxRuntime::backend_with_workload(backend, self.container_workload_mode()?)
+                        .with_artifact_reader(move |id, path, max_bytes| {
+                            let backend = artifact_backend.clone();
+                            async move { backend.read_artifact(&id, &path, max_bytes).await }
+                        }),
+                )
             }
         }
     }
@@ -1368,6 +1445,10 @@ impl SandboxArgs {
     fn workflow_host_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
         let mut envs = vec![("CENTAUR_API_URL".to_owned(), self.centaur_api_url())];
 
+        if let Some(value) = clean_optional_value(env::var("OPENAI_BASE_URL").ok().as_deref()) {
+            envs.push(("OPENAI_BASE_URL".to_owned(), value));
+        }
+
         for (name, value) in self.iron_proxy.sandbox_placeholder_env()? {
             envs.push((name, value));
         }
@@ -1482,6 +1563,7 @@ impl SandboxArgs {
         let ttl = |secs: u64| (secs > 0).then(|| Duration::from_secs(secs));
         SandboxReaperConfig {
             interval: Duration::from_secs(self.sandbox_reap_interval_secs),
+            orphan_sweep_grace: Duration::from_secs(self.sandbox_orphan_sweep_grace_secs),
             max_lifetime: ttl(self.sandbox_max_lifetime_secs),
         }
     }
@@ -1601,6 +1683,12 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
         config.tolerations = args.tolerations()?;
         config.runtime_class_name = args
             .runtime_class_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        config.service_account_name = args
+            .service_account_name
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty())
@@ -2313,6 +2401,73 @@ mod tests {
     }
 
     #[test]
+    fn session_event_retention_is_disabled_by_default() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+
+        assert!(args.session_event_retention_config().is_none());
+    }
+
+    #[test]
+    fn session_event_retention_days_are_bounded() {
+        for days in ["0", "3650"] {
+            let args = Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--session-events-retention-days",
+                days,
+            ])
+            .expect("accept retention boundary");
+            let config = args.session_event_retention_config();
+            if days == "0" {
+                assert!(config.is_none());
+            } else {
+                assert_eq!(
+                    config.expect("retention enabled").retention,
+                    Duration::from_secs(3650 * 24 * 60 * 60)
+                );
+            }
+        }
+        for days in ["3651", "4294967295"] {
+            let error = Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--session-events-retention-days",
+                days,
+            ])
+            .expect_err("reject excessive retention");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        }
+    }
+
+    #[test]
+    fn session_event_retention_has_an_independent_sweep_interval() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-events-retention-days",
+            "7",
+            "--session-events-retention-sweep-interval-secs",
+            "45",
+            "--session-sandbox-cleanup-interval-secs",
+            "0",
+        ])
+        .unwrap();
+
+        let config = args.session_event_retention_config().unwrap();
+        assert_eq!(config.retention, Duration::from_secs(7 * 24 * 60 * 60));
+        assert_eq!(config.interval, Duration::from_secs(45));
+        assert!(!args.sandbox_cleanup_config().is_enabled());
+    }
+
+    #[test]
     fn activity_summary_uses_direct_openai_key_by_default() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::set(&[
@@ -2504,6 +2659,24 @@ mod tests {
 
         let config = args.sandbox_reaper_config();
         assert_eq!(config.max_lifetime, Some(Duration::from_secs(259_200)));
+        assert_eq!(config.orphan_sweep_grace, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn sandbox_orphan_sweep_grace_is_configurable() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-orphan-sweep-grace-secs",
+            "1200",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.sandbox_reaper_config().orphan_sweep_grace,
+            Duration::from_secs(1200)
+        );
     }
 
     #[test]
@@ -2760,6 +2933,7 @@ mod tests {
             ),
             ("SLACK_ETL_ENABLED", "true"),
             ("SLACK_BACKFILL_ENABLED", "true"),
+            ("OPENAI_BASE_URL", "https://openai.example.test/v1"),
         ]);
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -2787,6 +2961,13 @@ mod tests {
                 .find(|env| env.name == "SLACK_ETL_ENABLED")
                 .map(|env| env.value.as_str()),
             Some("true")
+        );
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == "OPENAI_BASE_URL")
+                .map(|env| env.value.as_str()),
+            Some("https://openai.example.test/v1")
         );
         assert_eq!(
             spec.env
@@ -2977,6 +3158,8 @@ mod tests {
             r#"[{"key":"example.com/sandbox","operator":"Exists","effect":"NoSchedule"}]"#,
             "--session-sandbox-runtime-class-name",
             "gvisor",
+            "--session-sandbox-service-account-name",
+            "centaur-sandbox",
             "--session-sandbox-priority-class-name",
             "centaur-sandbox",
         ])
@@ -2988,6 +3171,10 @@ mod tests {
         );
         assert_eq!(args.sandbox.tolerations().unwrap().len(), 1);
         assert_eq!(args.sandbox.runtime_class_name.as_deref(), Some("gvisor"));
+        assert_eq!(
+            args.sandbox.service_account_name.as_deref(),
+            Some("centaur-sandbox")
+        );
         assert_eq!(
             args.sandbox.priority_class_name.as_deref(),
             Some("centaur-sandbox")
@@ -3005,6 +3192,7 @@ mod tests {
 
         assert!(args.sandbox.node_selector().unwrap().is_empty());
         assert!(args.sandbox.tolerations().unwrap().is_empty());
+        assert!(args.sandbox.service_account_name.is_none());
         assert!(args.sandbox.priority_class_name.is_none());
     }
 

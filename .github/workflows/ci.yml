@@ -96,6 +96,7 @@ jobs:
             '^package\.json$' \
             '^pnpm-lock\.yaml$' \
             '^pnpm-workspace\.yaml$' \
+            '^patches/' \
             '^\.github/workflows/ci\.yml$'
           set_output discordbot_checks \
             '^services/discordbot/' \
@@ -204,7 +205,12 @@ jobs:
         working-directory: services/api-rs
         env:
           SESSION_SQLX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-        run: cargo test --workspace
+        run: |
+          cargo test --workspace
+
+          PGPASSWORD=postgres createdb --host localhost --username postgres session_runtime
+          SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \
+            cargo test -p centaur-session-runtime -- --test-threads=1
 
       - name: Run API integration test
         working-directory: services/api-rs
@@ -302,6 +308,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Tool-host integration tests execute real CLIs through uvx.
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+
       - name: Sandbox Python tests
         env:
           GIT_CONFIG_GLOBAL: /dev/null
@@ -322,7 +331,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
           prune-cache: true
@@ -354,7 +363,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
           prune-cache: true
@@ -377,7 +386,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -403,7 +412,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -435,7 +444,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -469,7 +478,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -503,7 +512,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -540,7 +549,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
-        uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           allowed-skips: migration-order, harness-server-checks, rust-api, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
           jobs: ${{ toJSON(needs) }}

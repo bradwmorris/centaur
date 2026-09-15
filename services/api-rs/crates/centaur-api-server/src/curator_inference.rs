@@ -272,6 +272,7 @@ async fn run_inference(
         stdout,
         stderr,
         guard: _guard,
+        ..
     } = io;
     let stderr_task = tokio::spawn(async move {
         let stderr = BufReader::new(stderr);
@@ -497,6 +498,7 @@ mod tests {
             stdout: Box::pin(stdout),
             stderr: Box::pin(stderr),
             guard: SandboxIoGuard::new(()),
+            instance_id: None,
         };
         assert!(matches!(
             run_inference(io, &request(), "execution-1", Instant::now()).await,
@@ -519,6 +521,7 @@ mod tests {
             stdout: Box::pin(stdout),
             stderr: Box::pin(stderr),
             guard: SandboxIoGuard::new(()),
+            instance_id: None,
         };
         assert!(
             tokio::time::timeout(
@@ -558,6 +561,7 @@ mod tests {
             stdout: Box::pin(stdout),
             stderr: Box::pin(stderr),
             guard: SandboxIoGuard::new(()),
+            instance_id: None,
         };
         let response = run_inference(io, &request(), "execution-1", Instant::now())
             .await
