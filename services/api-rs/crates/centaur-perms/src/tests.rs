@@ -207,6 +207,8 @@ fn parses_hmac_sign_secret() {
     };
     assert_eq!(hmac.name, "FALCONX_P1");
     assert_eq!(hmac.hosts, vec!["api.falconx.io".to_owned()]);
+    assert!(hmac.http_methods.is_empty());
+    assert!(hmac.paths.is_empty());
     assert_eq!(hmac.algorithm, "sha256");
     assert_eq!(hmac.key_encoding, "base64");
     assert_eq!(hmac.output_encoding, "base64");
@@ -263,6 +265,42 @@ fn hmac_requires_hosts() {
         err.to_string().contains("'hosts' must be a non-empty"),
         "{err}"
     );
+}
+
+#[test]
+fn hmac_preserves_exact_request_scope_and_rejects_malformed_scope() {
+    let scoped = FALCONX_HMAC.replace(
+        "hosts = [\"api.falconx.io\"]",
+        "hosts = [\"api.falconx.io\"], http_methods = [\"POST\"], paths = [\"/api/webhooks/trigger\"]",
+    );
+    let parsed = tools::parse_secret(&entry(&scoped), &[]).unwrap();
+    let ParsedSecret::Hmac(hmac) = parsed.clone() else {
+        panic!("expected hmac")
+    };
+    assert_eq!(hmac.http_methods, vec!["POST"]);
+    assert_eq!(hmac.paths, vec!["/api/webhooks/trigger"]);
+    let out = translate::translate("tool-falconx", &[parsed], &SourcePolicy::env());
+    let SecretInput::Hmac(input) = &out.inputs[0] else {
+        panic!("expected hmac")
+    };
+    assert_eq!(input.rules.len(), 1);
+    assert_eq!(input.rules[0].host.as_deref(), Some("api.falconx.io"));
+    assert_eq!(input.rules[0].http_methods, vec!["POST"]);
+    assert_eq!(input.rules[0].paths, vec!["/api/webhooks/trigger"]);
+
+    for bad in [
+        "http_methods = []",
+        "http_methods = [\"post\"]",
+        "paths = []",
+        "paths = [\"api/webhooks/trigger\"]",
+        "paths = [\"/api/webhooks/trigger?wide=true\"]",
+    ] {
+        let invalid = FALCONX_HMAC.replace(
+            "hosts = [\"api.falconx.io\"]",
+            &format!("hosts = [\"api.falconx.io\"], {bad}"),
+        );
+        assert!(tools::parse_secret(&entry(&invalid), &[]).is_err(), "{bad}");
+    }
 }
 
 const CLOUDWATCH_AWS: &str = r#"{ type = "aws_auth", name = "cloudwatch", access_key_id = "AWS_ACCESS_KEY_ID", secret_access_key = "AWS_SECRET_ACCESS_KEY", hosts = ["logs.*.amazonaws.com", "monitoring.*.amazonaws.com"], allowed_services = ["logs", "monitoring"] }"#;

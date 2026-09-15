@@ -168,6 +168,8 @@ pub struct HmacHeader {
 pub struct HmacSignSecret {
     pub name: String,
     pub hosts: Vec<String>,
+    pub http_methods: Vec<String>,
+    pub paths: Vec<String>,
     pub credentials: Vec<(String, FieldSource)>,
     pub headers: Vec<HmacHeader>,
     pub algorithm: String,
@@ -769,6 +771,44 @@ fn parse_hmac(table: &toml::Table, name: &str) -> Result<HmacSignSecret> {
     let hosts = non_empty_str_array(table.get("hosts")).ok_or_else(|| {
         eyre!("hmac_sign entry {name:?} 'hosts' must be a non-empty array of non-empty strings")
     })?;
+    let http_methods = match table.get("http_methods") {
+        None => Vec::new(),
+        Some(value) => {
+            let methods = non_empty_str_array(Some(value)).ok_or_else(|| {
+                eyre!("hmac_sign entry {name:?} 'http_methods' must be a non-empty array of uppercase HTTP methods")
+            })?;
+            if methods
+                .iter()
+                .any(|method| !method.bytes().all(|byte| byte.is_ascii_uppercase()))
+            {
+                bail!(
+                    "hmac_sign entry {name:?} 'http_methods' must contain uppercase HTTP methods"
+                );
+            }
+            methods
+        }
+    };
+    let paths = match table.get("paths") {
+        None => Vec::new(),
+        Some(value) => {
+            let paths = non_empty_str_array(Some(value)).ok_or_else(|| {
+                eyre!(
+                    "hmac_sign entry {name:?} 'paths' must be a non-empty array of absolute paths"
+                )
+            })?;
+            if paths.iter().any(|path| {
+                !path.starts_with('/')
+                    || path.contains('?')
+                    || path.contains('#')
+                    || path.bytes().any(|byte| byte.is_ascii_whitespace())
+            }) {
+                bail!(
+                    "hmac_sign entry {name:?} 'paths' must contain absolute paths without query, fragment, or whitespace"
+                );
+            }
+            paths
+        }
+    };
     let credentials = parse_hmac_credentials(table.get("credentials"), name)?;
     let headers = parse_hmac_headers(table.get("headers"), name)?;
     let algorithm = parse_hmac_enum(table, name, "algorithm", HMAC_ALGORITHMS)?;
@@ -783,6 +823,8 @@ fn parse_hmac(table: &toml::Table, name: &str) -> Result<HmacSignSecret> {
     Ok(HmacSignSecret {
         name: name.to_owned(),
         hosts,
+        http_methods,
+        paths,
         credentials,
         headers,
         algorithm,
