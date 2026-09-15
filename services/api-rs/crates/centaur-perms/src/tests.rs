@@ -291,6 +291,8 @@ fn hmac_preserves_exact_request_scope_and_rejects_malformed_scope() {
     for bad in [
         "http_methods = []",
         "http_methods = [\"post\"]",
+        "http_methods = [\"TRACE\"]",
+        "http_methods = [\"*\"]",
         "paths = []",
         "paths = [\"api/webhooks/trigger\"]",
         "paths = [\"/api/webhooks/trigger?wide=true\"]",
