@@ -887,6 +887,7 @@ dependencies = [
  "base64 0.23.1",
  "centaur-iron-control",
  "centaur-iron-proxy",
+ "centaur-perms",
  "centaur-sandbox-agent-k8s",
  "centaur-sandbox-core",
  "centaur-sandbox-local",
