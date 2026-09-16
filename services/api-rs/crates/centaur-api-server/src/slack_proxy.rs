@@ -505,8 +505,10 @@ fn slack_proxy_config() -> Result<&'static SlackFileProxyConfig, ApiError> {
 
 impl SlackFileProxyConfig {
     fn from_env() -> Result<Self, ApiError> {
-        let bot_token = non_empty_env("SLACK_BOT_TOKEN")
-            .ok_or_else(|| ApiError::Internal("SLACK_BOT_TOKEN is not configured".to_owned()))?;
+        let bot_token = slack_proxy_bot_token(
+            non_empty_env("SLACK_FILE_PROXY_BOT_TOKEN"),
+            non_empty_env("SLACK_BOT_TOKEN"),
+        )?;
         Ok(Self {
             api_url: non_empty_env("SLACK_API_URL")
                 .unwrap_or_else(|| DEFAULT_SLACK_API_URL.to_owned())
@@ -519,6 +521,17 @@ impl SlackFileProxyConfig {
             ),
         })
     }
+}
+
+fn slack_proxy_bot_token(
+    file_proxy_token: Option<String>,
+    default_token: Option<String>,
+) -> Result<String, ApiError> {
+    file_proxy_token.or(default_token).ok_or_else(|| {
+        ApiError::Internal(
+            "SLACK_FILE_PROXY_BOT_TOKEN or SLACK_BOT_TOKEN is not configured".to_owned(),
+        )
+    })
 }
 
 #[derive(Debug)]
@@ -1219,6 +1232,22 @@ mod tests {
         assert!(matches!(
             ensure_history_channel_allowed(&claims, "C123456789").unwrap_err(),
             ApiError::Forbidden(_)
+        ));
+    }
+
+    #[test]
+    fn file_proxy_token_prefers_dedicated_token_and_falls_back() {
+        assert_eq!(
+            slack_proxy_bot_token(Some("dedicated".to_owned()), Some("shared".to_owned())).unwrap(),
+            "dedicated"
+        );
+        assert_eq!(
+            slack_proxy_bot_token(None, Some("shared".to_owned())).unwrap(),
+            "shared"
+        );
+        assert!(matches!(
+            slack_proxy_bot_token(None, None),
+            Err(ApiError::Internal(_))
         ));
     }
 

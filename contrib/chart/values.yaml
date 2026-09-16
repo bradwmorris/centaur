@@ -454,6 +454,11 @@ apiRs:
     tag: latest
     pullPolicy: Always
   port: 8080
+  # Optional dedicated Slack token for the authenticated Slack file proxy.
+  # When unset, the proxy keeps using the shared SLACK_BOT_TOKEN.
+  slackFileProxy:
+    botTokenSecretName: ""
+    botTokenSecretKey: SLACK_BOT_TOKEN
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
