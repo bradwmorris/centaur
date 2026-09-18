@@ -20,6 +20,7 @@ export type EvalUsageAttempt = {
   source_thread_id?: string
   source_execution_id: string
   source_turn_id?: string
+  call_index?: number
   usage_status: 'reported' | 'partial' | 'unavailable' | 'not_applicable'
   usage_missing_reason?: string
   input_tokens?: number
@@ -55,40 +56,45 @@ type Counts = Pick<
 
 export class EvalUsageCollector {
   readonly #metadata: EvalUsageMetadata
-  readonly #attempts = new Map<string, EvalUsageAttempt>()
+  readonly #attempts: EvalUsageAttempt[] = []
+  readonly #seenEvents = new Set<string>()
 
   constructor(metadata: EvalUsageMetadata) {
     this.#metadata = metadata
   }
 
   capture(source: SlackbotV2RendererSource): void {
+    const eventKey = sourceEventKey(source)
+    if (eventKey && this.#seenEvents.has(eventKey)) return
     const payload = outputPayload(source)
     if (!payload) return
     const usage = usageRecord(payload)
     if (!usage) return
     const counts = tokenCounts(usage)
     if (!Object.values(counts).some(value => value !== undefined)) return
+    if (eventKey) this.#seenEvents.add(eventKey)
     const sourceTurnId = turnId(payload)
-    const key = sourceTurnId ?? 'execution'
-    const existing =
-      this.#attempts.get(key) ?? (sourceTurnId ? this.#attempts.get('execution') : undefined)
-    if (sourceTurnId) this.#attempts.delete('execution')
-    this.#attempts.set(key, {
+    const existingIndex = matchingAttemptIndex(this.#attempts, counts, sourceTurnId)
+    const existing = existingIndex >= 0 ? this.#attempts[existingIndex] : undefined
+    const attempt: EvalUsageAttempt = {
       ...this.#metadata,
       ...(existing ?? {}),
       model_id: modelId(payload) ?? existing?.model_id ?? this.#metadata.model_id,
       display_tier: modelId(payload) ?? existing?.display_tier ?? this.#metadata.display_tier,
-      source_turn_id: sourceTurnId,
+      source_turn_id: sourceTurnId ?? existing?.source_turn_id,
+      call_index: existing?.call_index ?? this.#attempts.length + 1,
       usage_status: completeCounts(counts) ? 'reported' : 'partial',
       usage_missing_reason: completeCounts(counts)
         ? undefined
         : 'The harness reported only a subset of token categories.',
       ...definedCounts(existing, counts)
-    })
+    }
+    if (existingIndex >= 0) this.#attempts[existingIndex] = attempt
+    else this.#attempts.push(attempt)
   }
 
   finish(missingReason = 'The execution emitted no normalized token usage.'): EvalUsageAttempt[] {
-    if (this.#attempts.size > 0) return [...this.#attempts.values()]
+    if (this.#attempts.length > 0) return [...this.#attempts]
     return [
       {
         ...this.#metadata,
@@ -97,6 +103,34 @@ export class EvalUsageCollector {
       }
     ]
   }
+}
+
+function matchingAttemptIndex(
+  attempts: EvalUsageAttempt[],
+  counts: Counts,
+  sourceTurnId: string | undefined
+): number {
+  if (attempts.length === 0) return -1
+  const lastIndex = attempts.length - 1
+  const last = attempts[lastIndex]!
+  // A terminal event commonly repeats the immediately preceding usage update
+  // while adding a turn id or missing token category. Merge only that exact
+  // call; distinct usage updates remain distinct auditable model calls.
+  if (sourceTurnId && (!last.source_turn_id || last.source_turn_id === sourceTurnId)) {
+    const comparable = ['input_tokens', 'output_tokens', 'total_tokens'] as const
+    const conflicts = comparable.some(key =>
+      counts[key] !== undefined && last[key] !== undefined && counts[key] !== last[key]
+    )
+    if (!conflicts) return lastIndex
+  }
+  return -1
+}
+
+function sourceEventKey(source: SlackbotV2RendererSource): string | undefined {
+  if (!source || typeof source !== 'object') return undefined
+  const record = source as Record<string, unknown>
+  const id = record.eventId ?? record.event_id
+  return typeof id === 'string' || typeof id === 'number' ? String(id) : undefined
 }
 
 export async function* captureEvalUsage(

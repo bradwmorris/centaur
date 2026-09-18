@@ -44,6 +44,7 @@ describe('eval usage producer contract', () => {
       billing_mode: 'subscription_allowance',
       source_execution_id: 'execution-1',
       source_turn_id: 'turn-1',
+      call_index: 1,
       input_tokens: 100,
       cache_read_tokens: 20,
       output_tokens: 50,
@@ -52,6 +53,28 @@ describe('eval usage producer contract', () => {
       usage_status: 'reported'
     })
     expect(attempts[0]).not.toHaveProperty('estimated_micro_usd')
+  })
+
+  test('retains every distinct provider usage update and ignores replayed events', () => {
+    const usage = collector()
+    for (const [eventId, inputTokens, cachedInputTokens, outputTokens] of [
+      [10, 100, 80, 10],
+      [11, 120, 90, 12],
+      [11, 120, 90, 12]
+    ] as const) {
+      usage.capture({
+        eventKind: 'session.output.line',
+        eventId,
+        data: JSON.stringify({
+          method: 'thread/tokenUsage/updated',
+          params: { tokenUsage: { last: { inputTokens, cachedInputTokens, outputTokens, totalTokens: inputTokens + outputTokens } } }
+        })
+      })
+    }
+    expect(usage.finish()).toMatchObject([
+      { call_index: 1, input_tokens: 100, cache_read_tokens: 80, output_tokens: 10, total_tokens: 110 },
+      { call_index: 2, input_tokens: 120, cache_read_tokens: 90, output_tokens: 12, total_tokens: 132 }
+    ])
   })
 
   test('reports missing usage explicitly instead of silently recording zero', () => {

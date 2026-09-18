@@ -441,7 +441,7 @@ TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
 PROMPT_MANIFEST="$WORKSPACE_DIR/.centaur-instructions.json"
 compose-system-prompt --home-dir "$HOME_DIR" --target-prompt "$TARGET_PROMPT" --manifest "$PROMPT_MANIFEST"
 
-# Persona prompt injection is done by the API when it writes AGENTS_BASE.md.
+# Persona prompt injection is done by the API when it writes AGENTS_PERSONA.md.
 
 # Switch to workspace so the harness reads workspace/AGENTS.md (with persona overlay)
 cd "$WORKSPACE_DIR"

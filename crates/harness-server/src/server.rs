@@ -1598,6 +1598,7 @@ fn instruction_snapshot_value(directory: &Path) -> Value {
     json!({
         "method": "centaur/inputSnapshot",
         "params": {
+            "call_index": 1,
             "application_instructions": application_instructions,
             "provider_instructions": {
                 "status": "unavailable",

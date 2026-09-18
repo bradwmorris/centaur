@@ -191,6 +191,10 @@ pub struct PersonaDefinition {
     pub source_path: String,
     pub source_ref: Option<String>,
     pub prompt_hash: String,
+    #[serde(default)]
+    pub tool_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    pub tool_blocklist: Vec<String>,
     #[serde(skip_serializing)]
     pub prompt: String,
 }
@@ -202,6 +206,10 @@ pub struct PersonaContext {
     pub source_path: String,
     pub source_ref: Option<String>,
     pub prompt_hash: String,
+    #[serde(default)]
+    pub tool_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    pub tool_blocklist: Vec<String>,
     #[serde(skip_serializing)]
     pub prompt: String,
     pub defaulted: bool,
@@ -290,6 +298,8 @@ impl PersonaRegistry {
             source_path: persona.source_path.clone(),
             source_ref: persona.source_ref.clone(),
             prompt_hash: persona.prompt_hash.clone(),
+            tool_allowlist: persona.tool_allowlist.clone(),
+            tool_blocklist: persona.tool_blocklist.clone(),
             prompt: persona.prompt.clone(),
             defaulted,
             overlay_chain: self.overlay_chain.clone(),
@@ -1240,16 +1250,27 @@ impl SessionRuntime {
             ));
         }
         let thread_key = tool_host_thread_key(principal_id)?;
+        let capabilities = self
+            .resolve_sandbox_capabilities(Some(principal_id))
+            .await?;
+        let persona = match self.store.get_session(&thread_key).await {
+            Ok(session) => {
+                self.resolve_stored_persona(session.persona_id.as_deref(), &capabilities)?
+            }
+            Err(SessionStoreError::NotFound { .. }) => None,
+            Err(error) => return Err(error.into()),
+        };
         let harness = self
             .sandbox_runtime
             .warm_harness
             .clone()
             .unwrap_or(HarnessType::Codex);
-        let spec =
-            (self.sandbox_runtime.spec_factory)(&thread_key, "mcp-tool-catalog", &harness, None);
-        let capabilities = self
-            .resolve_sandbox_capabilities(Some(principal_id))
-            .await?;
+        let spec = (self.sandbox_runtime.spec_factory)(
+            &thread_key,
+            "mcp-tool-catalog",
+            &harness,
+            persona.as_ref(),
+        );
         Ok(ToolHostCallPolicy {
             principal_id: principal_id.to_owned(),
             tool_filter: tool_host_tool_filter_from_spec(spec, &capabilities),
@@ -6273,6 +6294,43 @@ fn append_spec_env_csv(spec: &mut SandboxSpec, name: &str, values: &str) {
     upsert_spec_env(spec, name, merged.join(","));
 }
 
+fn intersect_spec_env_csv(spec: &mut SandboxSpec, name: &str, values: &[String]) {
+    let declared = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>();
+    let existing = spec
+        .env
+        .iter()
+        .find(|env| env.name == name)
+        .and_then(|env| {
+            let entries = env
+                .value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .collect::<BTreeSet<_>>();
+            (!entries.is_empty()).then_some(entries)
+        });
+    let effective = match existing {
+        Some(existing) => existing
+            .intersection(&declared)
+            .copied()
+            .collect::<Vec<_>>(),
+        None => declared.into_iter().collect::<Vec<_>>(),
+    };
+    upsert_spec_env(
+        spec,
+        name,
+        if effective.is_empty() {
+            "__centaur_no_tools__".to_owned()
+        } else {
+            effective.join(",")
+        },
+    );
+}
+
 fn apply_persona_spec(mut spec: SandboxSpec, persona: Option<&PersonaContext>) -> SandboxSpec {
     let persona_prompt_path = format!("{SANDBOX_AGENT_HOME}/AGENTS_PERSONA.md");
     for name in [
@@ -6307,6 +6365,16 @@ fn apply_persona_spec(mut spec: SandboxSpec, persona: Option<&PersonaContext>) -
     );
     if let Some(source_ref) = persona.source_ref.as_ref() {
         upsert_spec_env(&mut spec, "CENTAUR_PERSONA_SOURCE_REF", source_ref.clone());
+    }
+    if let Some(allowlist) = persona.tool_allowlist.as_ref() {
+        intersect_spec_env_csv(&mut spec, "TOOL_ALLOWLIST", allowlist);
+    }
+    if !persona.tool_blocklist.is_empty() {
+        append_spec_env_csv(
+            &mut spec,
+            "TOOL_BLOCKLIST",
+            &persona.tool_blocklist.join(","),
+        );
     }
     spec
 }
@@ -7801,6 +7869,8 @@ mod tests {
                 source_path: "/repo/tools/personas/eng".to_owned(),
                 source_ref: Some("abc123".to_owned()),
                 prompt_hash: "sha256:prompt".to_owned(),
+                tool_allowlist: None,
+                tool_blocklist: Vec::new(),
                 prompt: "secret prompt".to_owned(),
             }],
             Some("eng".to_owned()),
@@ -7837,6 +7907,8 @@ mod tests {
                     source_path: "/repo/private/tools/personas/private".to_owned(),
                     source_ref: None,
                     prompt_hash: "sha256:private".to_owned(),
+                    tool_allowlist: None,
+                    tool_blocklist: Vec::new(),
                     prompt: "private prompt".to_owned(),
                 },
                 PersonaDefinition {
@@ -7845,6 +7917,8 @@ mod tests {
                     source_path: "/repo/public/tools/personas/public".to_owned(),
                     source_ref: None,
                     prompt_hash: "sha256:public".to_owned(),
+                    tool_allowlist: None,
+                    tool_blocklist: Vec::new(),
                     prompt: "public prompt".to_owned(),
                 },
             ],
@@ -7876,6 +7950,30 @@ mod tests {
                 .unwrap()
                 .persona_id,
             "public"
+        );
+    }
+
+    #[test]
+    fn persona_routing_narrows_tool_policy_without_broadening_principal_policy() {
+        let base = SandboxSpec::new("mock")
+            .env("TOOL_ALLOWLIST", "common,principal-only")
+            .env("TOOL_BLOCKLIST", "principal-blocked");
+        let mut engineering = test_persona_context("engineering");
+        engineering.tool_allowlist = Some(vec!["common".to_owned(), "dev-only".to_owned()]);
+        engineering.tool_blocklist = vec!["persona-blocked".to_owned()];
+        let engineering = apply_persona_spec(base.clone(), Some(&engineering));
+        assert_eq!(env_value(&engineering, "TOOL_ALLOWLIST"), Some("common"));
+        assert_eq!(
+            env_value(&engineering, "TOOL_BLOCKLIST"),
+            Some("persona-blocked,principal-blocked")
+        );
+
+        let mut research = test_persona_context("research");
+        research.tool_allowlist = Some(vec!["research-only".to_owned()]);
+        let research = apply_persona_spec(base, Some(&research));
+        assert_eq!(
+            env_value(&research, "TOOL_ALLOWLIST"),
+            Some("__centaur_no_tools__")
         );
     }
 
@@ -7917,6 +8015,8 @@ mod tests {
                 source_path: "/repo/tools/personas/eng".to_owned(),
                 source_ref: None,
                 prompt_hash: "sha256:eng".to_owned(),
+                tool_allowlist: None,
+                tool_blocklist: Vec::new(),
                 prompt: "engineering persona".to_owned(),
             }],
             Some("eng".to_owned()),
@@ -9246,6 +9346,8 @@ mod tests {
             source_path: format!("/repo/tools/personas/{persona_id}"),
             source_ref: Some("abc123".to_owned()),
             prompt_hash: format!("sha256:{}", hex::encode(Sha256::digest(prompt.as_bytes()))),
+            tool_allowlist: None,
+            tool_blocklist: Vec::new(),
             prompt,
             defaulted: false,
             overlay_chain: vec!["/repo/tools".to_owned()],
@@ -9755,6 +9857,8 @@ mod adoption_tests {
             source_path: format!("/repo/tools/personas/{persona_id}"),
             source_ref: Some("abc123".to_owned()),
             prompt_hash: format!("sha256:{persona_id}"),
+            tool_allowlist: None,
+            tool_blocklist: Vec::new(),
             prompt: format!("{persona_id} persona prompt"),
         });
         runtime_with(store, backend).with_personas(

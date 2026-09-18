@@ -146,7 +146,8 @@ describe('Slack interaction sink envelope', () => {
         slackApiUrl: `http://127.0.0.1:${slack.port}/api/`,
         interactionSink: {
           url: 'http://centaur-context.test/api/v1/ingest/slack/interactions',
-          token: 'i'.repeat(32)
+          token: 'i'.repeat(32),
+          workflowOwner: 'entity-workflow'
         },
         fetch: async (_input, init) => {
           sinkRequest = {
@@ -159,7 +160,11 @@ describe('Slack interaction sink envelope', () => {
           )
         }
       }
-      expect(await sendSlackInteractionSnapshot(options, currentMessage())).toEqual({
+      await sendSlackInteractionSnapshot(options, currentMessage(), [], { runStatus: 'running' })
+      expect(sinkRequest.body?.workflow_ownership).toBeUndefined()
+      expect(await sendSlackInteractionSnapshot(options, currentMessage(), [], {
+        runTrace: [{ entry_type: 'tool_call', status: 'completed', name: 'entity-workflow' }]
+      })).toEqual({
         chatObjectId: '00000000-0000-4000-8000-000000000123',
         outcome: 'sent'
       })
@@ -167,11 +172,15 @@ describe('Slack interaction sink envelope', () => {
       expect(sinkRequest.body?.messages).toHaveLength(2)
       expect(sinkRequest.body?.interaction_finished).toBe(true)
       expect(sinkRequest.body?.agent_usage).toEqual([])
+      expect(sinkRequest.body?.workflow_ownership).toEqual({
+        owner: 'entity-workflow',
+        mutation_intent: 'exclusive'
+      })
       expect(sinkRequest.body?.run).toMatchObject({
         interaction_id: '1780000001.000100',
         status: 'completed',
         started_at: '2026-05-27T00:00:01Z',
-        trace: [],
+        trace: [{ entry_type: 'tool_call', status: 'completed', name: 'entity-workflow' }],
         affected_object_ids: [],
         consulted_object_ids: []
       })

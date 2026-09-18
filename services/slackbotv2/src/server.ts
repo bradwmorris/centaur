@@ -236,6 +236,7 @@ function interactionSinkEnv(): SlackbotV2Options['interactionSink'] {
     identityOverrides: identityOverridesEnv(
       'SLACKBOTV2_INTERACTION_SINK_IDENTITY_OVERRIDES'
     ),
+    workflowOwner: optionalEnv('SLACKBOTV2_INTERACTION_SINK_WORKFLOW_OWNER'),
     usage: {
       provider: stringEnv('SLACKBOTV2_INTERACTION_SINK_USAGE_PROVIDER', 'unknown'),
       authMode: enumEnv(

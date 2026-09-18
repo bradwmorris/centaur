@@ -1,0 +1,40 @@
+# Agent instruction components
+
+Centaur composes model-visible instructions from one universal base, optional deployment overlays, one selected persona, and runtime restrictions. The prompt manifest records each component's role, source identifier, revision, path, hash, size, and whether it is the selected base.
+
+The universal base is intentionally small. Specialized policy must be delivered only when relevant through a persona, skill, surface component, generated capability metadata, or runtime enforcement.
+
+## Migration ledger
+
+| Previous global section | Disposition | Destination |
+| --- | --- | --- |
+| Identity | Retained and compressed | Universal runtime identity and workspace boundary |
+| Self-introspection | Moved | Generated persona, capability, and harness metadata; live runtime remains authoritative |
+| Writing Quality Gate | Retained and compressed | Universal directness and factual precision |
+| User Interaction | Retained and compressed | Immediate intent, material ambiguity, and honest partial completion |
+| Model, harness, and persona switching | Moved | On-demand product/runtime help |
+| Research and grounding | Moved | Research personas and research skills |
+| Granola guidance | Moved | Granola skill |
+| Company-context retrieval | Moved | Company-context skill and authorized personas |
+| Authoritative internal-data answers | Split | Owning-source verification stays universal; procedures move to relevant skills |
+| Deployment capability guidance | Moved | Live generated capability metadata and operations skills |
+| Sandbox API permissions | Moved | Runtime enforcement and authorized operations guidance |
+| Skill discovery manuals | Replaced | Active-skill metadata and lazy capability discovery |
+| Environment, Rust, Python, GitHub, and PR policy | Moved | Development persona and engineering skills |
+| Container lifecycle | Split | Runtime/environment component; writable boundary stays universal |
+| Tool CLI manuals | Replaced | Filtered generated catalogue and task-specific skills |
+| Observability commands | Moved | Operations/investigation skill |
+| Ethereum RPC guidance | Moved | Ethereum skill |
+| OAuth connection instructions | Moved | OAuth connection skill and supported direct-message surfaces |
+| Scheduled tasks | Moved | Scheduled-task skill |
+| MPP guidance | Moved | MPP skill |
+| Chat-channel references | Moved | Surface-specific instructions |
+| Files and attachments | Moved | Surface-specific capability guidance |
+| Responses | Retained and compressed | Universal no-duplicate-delivery rule |
+| Format complaints | Retained and compressed | Honor explicit output-medium corrections |
+| Artifact verification | Retained and compressed | Verify the requested user-visible surface |
+| Document libraries | Moved | Document skill |
+
+Runtime authorization remains authoritative. No persona, overlay, skill, or prompt component can grant a capability.
+
+Persona packages may declare `tool_allowlist` and `tool_blocklist` arrays in their `[tool.centaur]` metadata. These declarations only narrow the authenticated principal's effective tool policy; they cannot broaden it. Application tools remain absent from the initial model-visible catalogue and are resolved through filtered lazy discovery.

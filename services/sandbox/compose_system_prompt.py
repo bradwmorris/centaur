@@ -5,33 +5,87 @@ import argparse
 import hashlib
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 
 SEPARATOR = "\n\n---\n\n"
-OVERLAY_PROMPT = Path("services/sandbox/SYSTEM_PROMPT.md")
+PRODUCT_PROMPT = Path("services/sandbox/SYSTEM_PROMPT.md")
 PERSONA_PROMPT = Path("AGENTS_PERSONA.md")
 OBSERVABILITY_DISABLED_PROMPT = """[Observability access]
-This sandbox does not have Centaur observability access. Do not use vlogs, vmetrics, Grafana, or related internal logs/metrics tools.
+This sandbox does not have Centaur observability access. Do not use logs, metrics, or related observability tools.
 """
 
 
-def _append_file_fragment(fragments: list[str], source: Path) -> bool:
-    if not source.is_file():
-        return False
-    fragments.append(source.read_text())
-    return True
+class PromptCompositionError(RuntimeError):
+    """A startup prompt invariant could not be satisfied."""
 
 
-def _mounted_overlay_prompts(repo_mount: Path, baked_prompt: Path) -> list[Path]:
+@dataclass(frozen=True)
+class PromptSource:
+    path: Path
+    source_identifier: str
+    revision: str | None = None
+
+
+def _repository_prompts(repo_mount: Path) -> list[PromptSource]:
     if not repo_mount.is_dir():
         return []
-    prompts = sorted(repo_mount.glob(f"*/*/{OVERLAY_PROMPT}"))
-    if not baked_prompt.is_file():
-        return prompts
+    sources: list[PromptSource] = []
+    for path in sorted(repo_mount.glob(f"*/*/{PRODUCT_PROMPT}")):
+        relative = path.relative_to(repo_mount)
+        repository_id = "/".join(relative.parts[:2])
+        revision = _repository_revision(path.parents[2])
+        sources.append(PromptSource(path, repository_id, revision))
+    return sources
 
-    root_text = baked_prompt.read_text()
-    return [prompt for prompt in prompts if prompt.read_text() != root_text]
+
+def _repository_revision(repository: Path) -> str | None:
+    git_dir = repository / ".git"
+    if git_dir.is_file():
+        marker = git_dir.read_text().strip()
+        if marker.startswith("gitdir: "):
+            git_dir = (repository / marker.removeprefix("gitdir: ")).resolve()
+    head = git_dir / "HEAD"
+    if not head.is_file():
+        return None
+    value = head.read_text().strip()
+    if value.startswith("ref: "):
+        ref = git_dir / value.removeprefix("ref: ")
+        return ref.read_text().strip() if ref.is_file() else value.removeprefix("ref: ")
+    return value or None
+
+
+def _is_product_base(source: PromptSource, configured: set[str]) -> bool:
+    return source.source_identifier in configured or source.source_identifier.rsplit("/", 1)[-1] == "centaur"
+
+
+def _select_base(
+    baked: PromptSource,
+    mounted: list[PromptSource],
+    policy: str,
+) -> PromptSource:
+    if not baked.path.is_file():
+        raise PromptCompositionError("Centaur base prompt is missing from the sandbox image")
+    if not mounted:
+        return baked
+    hashes = {_sha256(source.path.read_text()) for source in mounted}
+    if len(hashes) > 1:
+        raise PromptCompositionError("multiple mounted Centaur base versions disagree")
+    mounted_base = mounted[0]
+    if mounted_base.path.read_text() == baked.path.read_text():
+        return baked
+    if policy == "baked":
+        return baked
+    if policy == "mounted":
+        return mounted_base
+    if policy == "fail_on_drift":
+        raise PromptCompositionError(
+            "Centaur base-version drift: baked and mounted product prompts disagree"
+        )
+    raise PromptCompositionError(
+        "CENTAUR_BASE_PROMPT_POLICY must be baked, mounted, or fail_on_drift"
+    )
 
 
 def compose_system_prompt(
@@ -41,57 +95,99 @@ def compose_system_prompt(
     repo_mount: Path,
     manifest_path: Path | None = None,
     observability_enabled: bool = True,
+    base_policy: str = "fail_on_drift",
+    product_repository_ids: set[str] | None = None,
 ) -> None:
-    base_prompt = home_dir / "AGENTS_BASE.md"
-    baked_prompt = home_dir / "AGENTS.md"
-    selected_base = base_prompt if base_prompt.is_file() else baked_prompt
-    if not selected_base.is_file():
-        return
-
-    components: list[dict[str, object]] = [
-        _component(
-            "persona_or_base" if base_prompt.is_file() else "base",
-            selected_base,
+    configured = product_repository_ids or set()
+    baked = PromptSource(
+        home_dir / "AGENTS.md",
+        "centaur:image",
+        os.environ.get("CENTAUR_BASE_PROMPT_REVISION"),
+    )
+    home_candidate = home_dir / "AGENTS_BASE.md"
+    mounted_candidates = _repository_prompts(repo_mount)
+    if home_candidate.is_file():
+        mounted_candidates.append(
+            PromptSource(
+                home_candidate,
+                os.environ.get("CENTAUR_BASE_PROMPT_SOURCE", "centaur:deployment"),
+                os.environ.get("CENTAUR_BASE_PROMPT_REVISION"),
+            )
         )
+    product_bases = [
+        source for source in mounted_candidates if source.path == home_candidate or _is_product_base(source, configured)
     ]
-    fragments = [selected_base.read_text()]
-    appended: set[Path] = set()
+    overlays = [source for source in mounted_candidates if source not in product_bases]
+    selected_base = _select_base(baked, product_bases, base_policy)
+
+    fragments = [selected_base.path.read_text()]
+    components = [_component("base", selected_base, selected_base=True)]
+    appended = {selected_base.path.resolve()}
 
     home_overlay = home_dir / "AGENTS_OVERLAY.md"
-    if _append_file_fragment(fragments, home_overlay):
+    if home_overlay.is_file():
+        fragments.append(home_overlay.read_text())
         appended.add(home_overlay.resolve())
-        components.append(_component("home_overlay", home_overlay))
+        components.append(
+            _component("home_overlay", PromptSource(home_overlay, "deployment:home"))
+        )
 
-    for prompt_path in _mounted_overlay_prompts(repo_mount, baked_prompt):
-        if not prompt_path.is_file():
+    for source in overlays:
+        if source.path.resolve() in appended:
             continue
-        resolved = prompt_path.resolve()
-        if resolved in appended:
-            continue
-        if _append_file_fragment(fragments, prompt_path):
-            appended.add(resolved)
-            components.append(_component("repository_overlay", prompt_path))
+        fragments.append(source.path.read_text())
+        appended.add(source.path.resolve())
+        components.append(_component("repository_overlay", source))
 
-    persona_prompt_path = home_dir / PERSONA_PROMPT
-    if _append_file_fragment(fragments, persona_prompt_path):
-        components.append(_component("persona", persona_prompt_path))
+    persona_path = home_dir / PERSONA_PROMPT
+    if persona_path.is_file():
+        persona = PromptSource(
+            persona_path,
+            os.environ.get("CENTAUR_PERSONA_ID", "persona:unknown"),
+            os.environ.get("CENTAUR_PERSONA_SOURCE_REF"),
+        )
+        fragments.append(persona_path.read_text())
+        components.append(
+            _component(
+                "persona",
+                persona,
+                declared_path=os.environ.get("CENTAUR_PERSONA_SOURCE_PATH"),
+            )
+        )
 
     if not observability_enabled:
         fragments.append(OBSERVABILITY_DISABLED_PROMPT)
         components.append(_text_component("runtime_restriction", OBSERVABILITY_DISABLED_PROMPT))
 
-    effective_prompt = SEPARATOR.join(fragments)
-    target_prompt.write_text(effective_prompt)
+    if sum(component["role"] == "base" for component in components) != 1:
+        raise PromptCompositionError("prompt manifest must contain exactly one base component")
+    if any(
+        component["role"] == "repository_overlay"
+        and str(component["path"]).endswith(str(PRODUCT_PROMPT))
+        and str(component["source_identifier"]).rsplit("/", 1)[-1] == "centaur"
+        for component in components
+    ):
+        raise PromptCompositionError("Centaur product prompt cannot be a repository overlay")
 
+    target_prompt.write_text(SEPARATOR.join(fragments))
     if manifest_path is not None:
         manifest_path.write_text(
             json.dumps(
                 {
-                    "version": 1,
+                    "version": 2,
                     "components": components,
+                    "selected_base": {
+                        "source_identifier": selected_base.source_identifier,
+                        "revision": selected_base.revision
+                        or f"sha256:{_sha256(selected_base.path.read_text())}",
+                        "path": str(selected_base.path),
+                        "sha256": _sha256(selected_base.path.read_text()),
+                    },
                     "persona": {
                         "id": os.environ.get("CENTAUR_PERSONA_ID"),
-                        "source": "AGENTS_BASE.md" if base_prompt.is_file() else None,
+                        "source_path": os.environ.get("CENTAUR_PERSONA_SOURCE_PATH"),
+                        "source_ref": os.environ.get("CENTAUR_PERSONA_SOURCE_REF"),
+                        "prompt_hash": os.environ.get("CENTAUR_PERSONA_PROMPT_HASH"),
                     },
                 },
                 separators=(",", ":"),
@@ -99,23 +195,46 @@ def compose_system_prompt(
         )
 
 
-def _component(kind: str, source: Path) -> dict[str, object]:
-    text = source.read_text()
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _component(
+    role: str,
+    source: PromptSource,
+    *,
+    selected_base: bool = False,
+    declared_path: str | None = None,
+) -> dict[str, object]:
+    text = source.path.read_text()
+    digest = _sha256(text)
     return {
-        "kind": kind,
-        "source": str(source),
-        "sha256": hashlib.sha256(text.encode()).hexdigest(),
+        "name": source.source_identifier,
+        "role": role,
+        "kind": role,
+        "source_identifier": source.source_identifier,
+        "revision": source.revision or f"sha256:{digest}",
+        "path": declared_path or str(source.path),
+        "source": str(source.path),
+        "sha256": digest,
+        "selected_base": selected_base,
         "chars": len(text),
         "estimated_tokens": (len(text) + 3) // 4,
         "text": text,
     }
 
 
-def _text_component(kind: str, text: str) -> dict[str, object]:
+def _text_component(role: str, text: str) -> dict[str, object]:
     return {
-        "kind": kind,
+        "name": role,
+        "role": role,
+        "kind": role,
+        "source_identifier": "runtime",
+        "revision": None,
+        "path": "runtime",
         "source": "runtime",
-        "sha256": hashlib.sha256(text.encode()).hexdigest(),
+        "sha256": _sha256(text),
+        "selected_base": False,
         "chars": len(text),
         "estimated_tokens": (len(text) + 3) // 4,
         "text": text,
@@ -128,6 +247,19 @@ def main() -> int:
     parser.add_argument("--repo-mount")
     parser.add_argument("--target-prompt", required=True)
     parser.add_argument("--manifest")
+    parser.add_argument(
+        "--base-policy",
+        default=os.environ.get("CENTAUR_BASE_PROMPT_POLICY", "fail_on_drift"),
+    )
+    parser.add_argument(
+        "--product-repository-id",
+        action="append",
+        default=[
+            value.strip()
+            for value in os.environ.get("CENTAUR_BASE_PROMPT_REPOSITORY_IDS", "").split(",")
+            if value.strip()
+        ],
+    )
     args = parser.parse_args()
 
     home_dir = Path(args.home_dir)
@@ -140,6 +272,8 @@ def main() -> int:
             "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED", "true"
         ).lower()
         != "false",
+        base_policy=args.base_policy,
+        product_repository_ids=set(args.product_repository_id),
     )
     return 0
 

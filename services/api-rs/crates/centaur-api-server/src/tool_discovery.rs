@@ -510,12 +510,17 @@ fn load_plugin_meta(
         let digest = Sha256::digest(prompt.as_bytes());
         format!("sha256:{}", hex::encode(digest))
     };
+    let tool_allowlist = optional_string_array(tool_conf.get("tool_allowlist"))?;
+    let tool_blocklist =
+        optional_string_array(tool_conf.get("tool_blocklist"))?.unwrap_or_default();
     Ok(Some(LoadedPluginMeta::Persona(PersonaDefinition {
         id,
         source_root: source_root.display().to_string(),
         source_path: plugin_dir.display().to_string(),
         source_ref: None,
         prompt_hash,
+        tool_allowlist,
+        tool_blocklist,
         prompt,
     })))
 }
@@ -1846,6 +1851,11 @@ secrets = [
             eng["prompt_hash"],
             "sha256:af70f573f4496a1cf92865966cb522c2c142a5789e075660a56bea66080bc738"
         );
+        assert_eq!(
+            eng["tool_allowlist"],
+            serde_json::json!(["common", "engineering"])
+        );
+        assert_eq!(eng["tool_blocklist"], serde_json::json!(["unrelated"]));
         assert!(
             discover_persona_registry(&[base.clone(), overlay.clone()], Some("missing".to_owned()))
                 .is_err()
@@ -2023,6 +2033,8 @@ description = "persona"
 
 [tool.centaur]
 type = "persona"
+tool_allowlist = ["common", "engineering"]
+tool_blocklist = ["unrelated"]
 "#,
         )
         .unwrap();
