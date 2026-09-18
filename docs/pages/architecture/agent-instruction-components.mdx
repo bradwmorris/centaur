@@ -36,3 +36,5 @@ The universal base is intentionally small. Specialized policy must be delivered 
 | Document libraries | Moved | Document skill |
 
 Runtime authorization remains authoritative. No persona, overlay, skill, or prompt component can grant a capability.
+
+Persona packages may declare `tool_allowlist` and `tool_blocklist` arrays in their `[tool.centaur]` metadata. These declarations only narrow the authenticated principal's effective tool policy; they cannot broaden it. Application tools remain absent from the initial model-visible catalogue and are resolved through filtered lazy discovery.
