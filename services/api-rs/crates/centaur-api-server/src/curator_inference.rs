@@ -95,6 +95,52 @@ fn default_reasoning_effort() -> String {
     "low".to_owned()
 }
 
+fn memory_only_curator_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["create_objects", "create_connections"],
+        "properties": {
+            "create_objects": {"type": "array", "items": {"$ref": "#/$defs/create_object"}},
+            "create_connections": {"type": "array", "items": {"$ref": "#/$defs/create_connection"}}
+        },
+        "$defs": {
+            "uuid": {"type": "string"},
+            "message_ids": {"type": "array", "items": {"$ref": "#/$defs/uuid"}},
+            "memory_fields": {
+                "type": "object", "additionalProperties": false,
+                "required": ["primary_event", "happened_at"],
+                "properties": {"primary_event": {"type": "boolean"}, "happened_at": {"type": "string"}}
+            },
+            "object_ref": {
+                "anyOf": [
+                    {"type": "object", "additionalProperties": false, "required": ["object_id"], "properties": {"object_id": {"$ref": "#/$defs/uuid"}}},
+                    {"type": "object", "additionalProperties": false, "required": ["client_id"], "properties": {"client_id": {"type": "string"}}}
+                ]
+            },
+            "create_object": {
+                "type": "object", "additionalProperties": false,
+                "required": ["client_id", "kind", "title", "description", "supporting_message_ids", "memory"],
+                "properties": {
+                    "client_id": {"type": "string"}, "kind": {"type": "string", "enum": ["memory"]}, "title": {"type": "string"},
+                    "description": {"type": "string"}, "supporting_message_ids": {"$ref": "#/$defs/message_ids"},
+                    "memory": {"$ref": "#/$defs/memory_fields"}
+                }
+            },
+            "create_connection": {
+                "type": "object", "additionalProperties": false,
+                "required": ["source", "kind", "target", "description", "supporting_message_ids"],
+                "properties": {
+                    "source": {"$ref": "#/$defs/object_ref"},
+                    "kind": {"type": "string", "enum": ["involves", "about", "themed", "related_to", "derived_from"]},
+                    "target": {"$ref": "#/$defs/object_ref"}, "description": {"type": "string"},
+                    "supporting_message_ids": {"$ref": "#/$defs/message_ids"}
+                }
+            }
+        }
+    })
+}
+
 impl CuratorInferenceRuntime {
     pub fn new(sandbox: SandboxRuntime, spec: SandboxSpec, timeout: Duration) -> Self {
         Self {
@@ -220,34 +266,9 @@ fn validate_request(request: &CuratorInferenceRequest) -> Result<(), ApiError> {
             "output_schema must be a JSON object".to_owned(),
         ));
     }
-    let expected_fields = [
-        "create_connections",
-        "create_objects",
-        "update_connections",
-        "update_objects",
-    ];
-    let mut required = request
-        .output_schema
-        .get("required")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .collect::<Vec<_>>();
-    required.sort_unstable();
-    let mut properties = request
-        .output_schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .map(|properties| properties.keys().map(String::as_str).collect::<Vec<_>>())
-        .unwrap_or_default();
-    properties.sort_unstable();
-    if required != expected_fields
-        || properties != expected_fields
-        || request.output_schema.get("additionalProperties") != Some(&Value::Bool(false))
-    {
+    if request.output_schema != memory_only_curator_schema() {
         return Err(ApiError::BadRequest(
-            "output_schema must be the dedicated four-array Curator plan contract".to_owned(),
+            "output_schema must be the dedicated memory-only Curator plan contract".to_owned(),
         ));
     }
     if !matches!(
@@ -418,15 +439,7 @@ mod tests {
             request_id: "request-1".to_owned(),
             system_prompt: "curate".to_owned(),
             input: "evidence".to_owned(),
-            output_schema: json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["create_objects", "update_objects", "create_connections", "update_connections"],
-                "properties": {
-                    "create_objects": {}, "update_objects": {},
-                    "create_connections": {}, "update_connections": {}
-                }
-            }),
+            output_schema: memory_only_curator_schema(),
             reasoning_effort: "low".to_owned(),
         }
     }
@@ -440,6 +453,39 @@ mod tests {
             validate_request(&invalid),
             Err(ApiError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn rejects_legacy_and_unsafe_curator_schemas() {
+        let legacy_schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["create_objects", "update_objects", "create_connections", "update_connections"],
+            "properties": {
+                "create_objects": {}, "update_objects": {},
+                "create_connections": {}, "update_connections": {}
+            }
+        });
+        let mut unsafe_kind_schema = memory_only_curator_schema();
+        unsafe_kind_schema["$defs"]["create_object"]["properties"]["kind"]["enum"] =
+            json!(["memory", "task"]);
+        let mut permissive_schema = memory_only_curator_schema();
+        permissive_schema["$defs"]["create_connection"]["additionalProperties"] = Value::Bool(true);
+
+        for output_schema in [
+            legacy_schema,
+            unsafe_kind_schema,
+            permissive_schema,
+            json!({"type": "object"}),
+        ] {
+            let mut invalid = request();
+            invalid.output_schema = output_schema;
+            assert!(matches!(
+                validate_request(&invalid),
+                Err(ApiError::BadRequest(message))
+                    if message == "output_schema must be the dedicated memory-only Curator plan contract"
+            ));
+        }
     }
 
     #[test]
@@ -546,7 +592,7 @@ mod tests {
         tokio::spawn(async move {
             let events = [
                 json!({"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":12,"outputTokens":4,"totalTokens":16}}}}),
-                json!({"method":"item/completed","params":{"item":{"type":"agentMessage","phase":"final_answer","text":"{\"create_objects\":[],\"update_objects\":[],\"create_connections\":[],\"update_connections\":[]}"}}}),
+                json!({"method":"item/completed","params":{"item":{"type":"agentMessage","phase":"final_answer","text":"{\"create_objects\":[],\"create_connections\":[]}"}}}),
                 json!({"method":"turn/completed","params":{"turn":{"status":"completed"}}}),
             ];
             for event in events {
