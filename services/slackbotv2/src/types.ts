@@ -218,6 +218,8 @@ export type SlackbotV2Options = {
     botIdentity?: SlackIdentityOverride
     /** Optional canonical presentation keyed by Slack provider user ID. */
     identityOverrides?: Record<string, SlackIdentityOverride>
+    /** Optional deployment-owned workflow that exclusively handles durable mutations. */
+    workflowOwner?: string
     usage?: {
       provider: string
       authMode: 'chatgpt_subscription' | 'api_key' | 'not_applicable' | 'unknown'

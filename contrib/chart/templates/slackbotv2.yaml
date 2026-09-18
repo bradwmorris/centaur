@@ -165,6 +165,10 @@ spec:
             - name: SLACKBOTV2_INTERACTION_SINK_IDENTITY_OVERRIDES
               value: {{ $slackbot.interactionSink.identityOverrides | toJson | quote }}
 {{- end }}
+{{- if $slackbot.interactionSink.workflowOwner }}
+            - name: SLACKBOTV2_INTERACTION_SINK_WORKFLOW_OWNER
+              value: {{ $slackbot.interactionSink.workflowOwner | quote }}
+{{- end }}
             - name: SLACKBOTV2_INTERACTION_SINK_USAGE_PROVIDER
               value: {{ $slackbot.interactionSink.usage.provider | quote }}
             - name: SLACKBOTV2_INTERACTION_SINK_USAGE_AUTH_MODE

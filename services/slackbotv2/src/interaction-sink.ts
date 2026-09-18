@@ -30,6 +30,10 @@ export type SlackInteractionSinkEnvelope = {
   messages: SlackInteractionSinkMessage[]
   interaction_finished: boolean
   agent_usage?: EvalUsageAttempt[]
+  workflow_ownership?: {
+    owner: string
+    mutation_intent: 'exclusive'
+  }
   run?: {
     interaction_id: string
     status: 'running' | 'completed' | 'failed'
@@ -166,6 +170,12 @@ export async function sendSlackInteractionSnapshot(
     consulted_object_ids: overrides.consultedObjectIds ?? [],
     ...(overrides.error ? { error: overrides.error.slice(0, 4_000) } : {})
   }
+  if (sink.workflowOwner && completedWorkflowInvocation(envelope.run.trace, sink.workflowOwner)) {
+    envelope.workflow_ownership = {
+      owner: sink.workflowOwner,
+      mutation_intent: 'exclusive'
+    }
+  }
 
   const fetchFn = options.fetch ?? fetch
   const controller = new AbortController()
@@ -194,6 +204,12 @@ export async function sendSlackInteractionSnapshot(
   } finally {
     clearTimeout(timeout)
   }
+}
+
+function completedWorkflowInvocation(trace: JsonObject[], owner: string): boolean {
+  return trace.some(entry =>
+    entry.entry_type === 'tool_call' && entry.status === 'completed' && entry.name === owner
+  )
 }
 
 async function enrichSlackIdentities(

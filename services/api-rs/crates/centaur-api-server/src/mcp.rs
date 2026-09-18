@@ -110,6 +110,7 @@ struct CentaurArtifactGetArguments {
 }
 
 const MCP_ARTIFACT_MAX_BYTES: usize = 10 * 1024 * 1024;
+const MCP_INLINE_RESULT_CHARS: usize = 16_000;
 
 struct McpToolCallOutcome {
     result: Value,
@@ -364,15 +365,11 @@ fn mcp_initialize_result(params: &Value) -> Value {
     if mcp_v2_enabled() {
         result["instructions"] = Value::String(
             concat!(
-                "Centaur has a large tool catalog that changes dynamically. Representative ",
-                "tools include `company_context`, `slack`, `gsuite`, `linear`, `granola`, ",
-                "`websearch`, `figma`, `notion`, `dune`, `allium`, `grafana`, and `sentry`. ",
-                "Availability varies by Console policy, and these names are capability hints, ",
-                "not the complete catalog. Whenever you determine that you need to find or ",
-                "choose a tool, call `centaur_catalog_search`; do not infer catalog availability ",
-                "from the short MCP bootstrap tool list. In particular, search when a request ",
-                "involves an external service, private or current data, an external action, or ",
-                "a service URL. Load the selected tool with `centaur_catalog_load`, follow its ",
+                "This bootstrap exposes only runtime-available discovery and artifact tools. ",
+                "Application capabilities are filtered by the authenticated principal's effective ",
+                "policy and are not serialized into the initial catalogue. When a task needs an ",
+                "external capability, call `centaur_catalog_search`. Load the selected tool with ",
+                "`centaur_catalog_load`, follow its ",
                 "help and skill instructions, then invoke it with `centaur_tool_call`. When the ",
                 "user needs a downloadable artifact, instruct the producing tool to write it ",
                 "beneath `/tmp/downloads`, then immediately call `centaur_artifact_get` with its ",
@@ -580,6 +577,7 @@ fn mcp_v2_catalog_result(tools: Vec<DiscoveredTool>) -> Result<Value, ApiError> 
             json!({
                 "name": tool.name,
                 "description": tool.description,
+                "inclusion_reason": "matched_query_and_effective_principal_policy",
             })
         })
         .collect::<Vec<_>>();
@@ -1145,18 +1143,25 @@ fn mcp_v1_output_result(
     }
     match serde_json::from_str::<Value>(stdout) {
         Ok(value) => Ok(McpToolCallOutcome {
-            result: mcp_text_result(serde_json::to_string_pretty(&value)?, false),
+            result: bounded_mcp_text_result(
+                serde_json::to_string_pretty(&value)?,
+                false,
+                &output,
+                "stdout",
+            )?,
             timed_out: false,
         }),
         Err(error) => Ok(McpToolCallOutcome {
-            result: mcp_text_result(
+            result: bounded_mcp_text_result(
                 format!(
                     "centaur tool {}.{method} returned non-json output in {}: {error}: {stdout}",
                     tool.name,
                     tool_host_error_context(&output)
                 ),
                 true,
-            ),
+                &output,
+                "stdout",
+            )?,
             timed_out: false,
         }),
     }
@@ -1164,11 +1169,18 @@ fn mcp_v1_output_result(
 
 fn mcp_v2_run_output_result(output: ToolHostCallOutput) -> Result<McpToolCallOutcome, ApiError> {
     let is_error = output.timed_out || output.exit_status != Some(0);
+    let (stdout, stdout_bounds) = bounded_tool_stream(&output.stdout, &output, "stdout");
+    let (stderr, stderr_bounds) = bounded_tool_stream(&output.stderr, &output, "stderr");
+    let output_bounds = [stdout_bounds, stderr_bounds]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     let content = json!({
-        "stdout": output.stdout,
-        "stderr": output.stderr,
+        "stdout": stdout,
+        "stderr": stderr,
         "exit_status": output.exit_status,
         "timed_out": output.timed_out,
+        "output_bounds": output_bounds,
     });
     let mut result = mcp_text_result(serde_json::to_string_pretty(&content)?, is_error);
     result["structuredContent"] = content;
@@ -1183,13 +1195,20 @@ fn mcp_v2_load_output_result(
     output: ToolHostCallOutput,
 ) -> Result<McpToolCallOutcome, ApiError> {
     let is_error = output.timed_out || output.exit_status != Some(0);
+    let (help, help_bounds) = bounded_tool_stream(&output.stdout, &output, "stdout");
+    let (stderr, stderr_bounds) = bounded_tool_stream(&output.stderr, &output, "stderr");
+    let output_bounds = [help_bounds, stderr_bounds]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     let content = json!({
         "tool": tool.name,
         "description": tool.description,
-        "help": output.stdout,
-        "stderr": output.stderr,
+        "help": help,
+        "stderr": stderr,
         "exit_status": output.exit_status,
         "timed_out": output.timed_out,
+        "output_bounds": output_bounds,
     });
     let mut result = mcp_text_result(serde_json::to_string_pretty(&content)?, is_error);
     result["structuredContent"] = content;
@@ -1197,6 +1216,72 @@ fn mcp_v2_load_output_result(
         result,
         timed_out: output.timed_out,
     })
+}
+
+fn bounded_mcp_text_result(
+    text: String,
+    is_error: bool,
+    output: &ToolHostCallOutput,
+    stream: &str,
+) -> Result<Value, ApiError> {
+    let (excerpt, bounds) = bounded_tool_stream(&text, output, stream);
+    match bounds {
+        None => Ok(mcp_text_result(excerpt, is_error)),
+        Some(bounds) => {
+            let content = json!({"excerpt": excerpt, "output_bounds": bounds});
+            let mut result = mcp_text_result(serde_json::to_string_pretty(&content)?, is_error);
+            result["structuredContent"] = content;
+            Ok(result)
+        }
+    }
+}
+
+fn bounded_tool_stream(
+    value: &str,
+    output: &ToolHostCallOutput,
+    stream: &str,
+) -> (String, Option<Value>) {
+    let total_chars = value.chars().count();
+    if total_chars <= MCP_INLINE_RESULT_CHARS {
+        return (value.to_owned(), None);
+    }
+    let sample = value.chars().take(2048).collect::<String>();
+    let base64_like = sample.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '+' | '/' | '=' | '\r' | '\n')
+    });
+    let excerpt = if base64_like {
+        format!("[binary or base64-like {stream} omitted: {total_chars} characters]")
+    } else {
+        let head = value.chars().take(10_000).collect::<String>();
+        let tail = value
+            .chars()
+            .rev()
+            .take(6_000)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        format!(
+            "{head}\n\n…[truncated {} characters; complete output is in the durable execution event]…\n\n{tail}",
+            total_chars.saturating_sub(16_000)
+        )
+    };
+    let digest = Sha256::digest(value.as_bytes());
+    (
+        excerpt,
+        Some(json!({
+            "stream": stream,
+            "truncated": true,
+            "full_characters": total_chars,
+            "sha256": hex::encode(digest),
+            "durable_event": {
+                "source_execution_id": output.execution_id,
+                "request_id": output.request_id,
+                "event_type": "session.execution_completed",
+            },
+            "retrieval": "Request a narrower tool query or, when authorized, read the referenced execution event to retrieve the complete output.",
+        })),
+    )
 }
 
 fn mcp_artifact_get_output_result(
@@ -2338,8 +2423,8 @@ def search(query, limit=20):
             Box::leak(temp.display().to_string().into_boxed_str()),
         )]);
         let expected = json!({"tools": [
-            {"name": "alpha", "description": "alpha service"},
-            {"name": "beta", "description": "beta service"},
+            {"name": "alpha", "description": "alpha service", "inclusion_reason": "matched_query_and_effective_principal_policy"},
+            {"name": "beta", "description": "beta service", "inclusion_reason": "matched_query_and_effective_principal_policy"},
         ]});
         let search = mcp_v2_catalog_search(&SandboxToolFilter::default(), "service").unwrap();
         assert_eq!(search["structuredContent"], expected);
@@ -2354,7 +2439,7 @@ def search(query, limit=20):
         };
         assert_eq!(
             mcp_v2_catalog_search(&filter, "service").unwrap()["structuredContent"],
-            json!({"tools": [{"name": "alpha", "description": "alpha service"}]})
+            json!({"tools": [{"name": "alpha", "description": "alpha service", "inclusion_reason": "matched_query_and_effective_principal_policy"}]})
         );
         assert_eq!(
             mcp_v2_catalog_search(&filter, "beta").unwrap()["structuredContent"],
@@ -2394,7 +2479,7 @@ def search(query, limit=20):
         .unwrap();
         assert_eq!(
             mcp_v2_catalog_search(&filter, "demo").unwrap()["structuredContent"],
-            json!({"tools": [{"name": "demo", "description": null}]})
+            json!({"tools": [{"name": "demo", "description": null, "inclusion_reason": "matched_query_and_effective_principal_policy"}]})
         );
         fs::remove_dir_all(package_dir).unwrap();
         assert_eq!(
@@ -2468,7 +2553,7 @@ def search(query, limit=20):
             .unwrap();
             assert_eq!(outcome.timed_out, timed_out);
             assert_eq!(mcp_result_is_error(&outcome.result), is_error);
-            let expected = json!({"stdout": stdout, "stderr": stderr, "exit_status": exit_status, "timed_out": timed_out});
+            let expected = json!({"stdout": stdout, "stderr": stderr, "exit_status": exit_status, "timed_out": timed_out, "output_bounds": []});
             assert_eq!(outcome.result["structuredContent"], expected);
             assert_eq!(
                 serde_json::from_str::<Value>(
@@ -2478,6 +2563,78 @@ def search(query, limit=20):
                 expected
             );
         }
+    }
+
+    #[test]
+    fn large_tool_output_is_bounded_with_head_tail_and_durable_reference() {
+        let mut stdout = "head evidence\n".to_owned();
+        stdout.push_str(&"x".repeat(MCP_INLINE_RESULT_CHARS + 1));
+        stdout.push_str("\ntail failure evidence");
+        let outcome = mcp_v2_run_output_result(ToolHostCallOutput {
+            request_id: "request-1".to_owned(),
+            execution_id: "execution-1".to_owned(),
+            sandbox_id: "sandbox".to_owned(),
+            stdout,
+            stderr: String::new(),
+            exit_status: Some(0),
+            timed_out: false,
+        })
+        .unwrap();
+        let content = &outcome.result["structuredContent"];
+        assert!(
+            content["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("head evidence")
+        );
+        assert!(
+            content["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("tail failure evidence")
+        );
+        assert_eq!(content["output_bounds"][0]["truncated"], true);
+        assert_eq!(
+            content["output_bounds"][0]["durable_event"]["source_execution_id"],
+            "execution-1"
+        );
+        assert!(
+            content["output_bounds"][0]["retrieval"]
+                .as_str()
+                .unwrap()
+                .contains("narrower tool query")
+        );
+    }
+
+    #[test]
+    fn structured_and_binary_tool_output_is_bounded_deterministically() {
+        let output = ToolHostCallOutput {
+            request_id: "request-2".to_owned(),
+            execution_id: "execution-2".to_owned(),
+            sandbox_id: "sandbox".to_owned(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_status: Some(0),
+            timed_out: false,
+        };
+        let structured = format!(
+            "{{\"records\":[\"first-evidence\",\"{}\",\"last-evidence\"]}}",
+            "record,".repeat(MCP_INLINE_RESULT_CHARS)
+        );
+        let first = bounded_tool_stream(&structured, &output, "stdout");
+        let replay = bounded_tool_stream(&structured, &output, "stdout");
+        assert_eq!(
+            first, replay,
+            "replayed output must keep a stable excerpt and hash"
+        );
+        assert!(first.0.contains("first-evidence"));
+        assert!(first.0.contains("last-evidence"));
+        assert_eq!(first.1.as_ref().unwrap()["truncated"], true);
+
+        let encoded = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=".repeat(600);
+        let (excerpt, bounds) = bounded_tool_stream(&encoded, &output, "stdout");
+        assert!(excerpt.contains("binary or base64-like stdout omitted"));
+        assert_eq!(bounds.unwrap()["durable_event"]["request_id"], "request-2");
     }
 
     #[test]

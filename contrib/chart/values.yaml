@@ -464,7 +464,9 @@ apiRs:
   mcpPublicUrl: ""
   runMigrations: true
   # Expose the experimental centaur MCP dispatcher (currently action=list).
-  mcpV2Enabled: false
+  # Advertise only the filtered lazy-discovery bootstrap instead of serializing
+  # every installed application tool into each model's initial context.
+  mcpV2Enabled: true
   sandboxBackend: agent-k8s
   sandboxWorkload: codex-app-server
   sandboxReadyTimeoutSecs: 90
@@ -679,6 +681,8 @@ slackbotv2:
     # may override botIdentity while identityOverrides are keyed by Slack user ID.
     botIdentity: {}
     identityOverrides: {}
+    # When set, this deployment-owned workflow exclusively handles durable mutations.
+    workflowOwner: ""
     secretName: ""
     secretKey: CHAT_INGEST_API_TOKEN
     # Explicit runtime facts for normalized model-usage traces. Keep unknown
