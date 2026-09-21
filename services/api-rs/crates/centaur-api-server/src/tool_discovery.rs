@@ -513,6 +513,7 @@ fn load_plugin_meta(
     let tool_allowlist = optional_string_array(tool_conf.get("tool_allowlist"))?;
     let tool_blocklist =
         optional_string_array(tool_conf.get("tool_blocklist"))?.unwrap_or_default();
+    let skill_allowlist = optional_string_array(tool_conf.get("skill_allowlist"))?;
     Ok(Some(LoadedPluginMeta::Persona(PersonaDefinition {
         id,
         source_root: source_root.display().to_string(),
@@ -521,6 +522,7 @@ fn load_plugin_meta(
         prompt_hash,
         tool_allowlist,
         tool_blocklist,
+        skill_allowlist,
         prompt,
     })))
 }
@@ -1856,6 +1858,10 @@ secrets = [
             serde_json::json!(["common", "engineering"])
         );
         assert_eq!(eng["tool_blocklist"], serde_json::json!(["unrelated"]));
+        assert_eq!(
+            eng["skill_allowlist"],
+            serde_json::json!(["engineering-work"])
+        );
         assert!(
             discover_persona_registry(&[base.clone(), overlay.clone()], Some("missing".to_owned()))
                 .is_err()
@@ -2035,6 +2041,7 @@ description = "persona"
 type = "persona"
 tool_allowlist = ["common", "engineering"]
 tool_blocklist = ["unrelated"]
+skill_allowlist = ["engineering-work"]
 "#,
         )
         .unwrap();
