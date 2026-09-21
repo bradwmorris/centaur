@@ -312,11 +312,17 @@ class GeneratedShimTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bin_dir = root / "bin"
-            fake_bin = root / "fake-bin"
             project_dir = root / "tools" / "research" / "websearch"
             bin_dir.mkdir()
-            fake_bin.mkdir()
             project_dir.mkdir(parents=True)
+            (project_dir / "client.py").write_text(
+                "from pathlib import Path\n"
+                "import os\n"
+                "import sys\n"
+                "def main():\n"
+                "    Path(os.environ['ARGV_LOG']).write_text('\\n'.join(sys.argv) + '\\n')\n"
+                "    Path(os.environ['PYTHONPATH_LOG']).write_text(os.environ.get('PYTHONPATH', ''))\n"
+            )
 
             index_path = bin_dir / ".centaur-tools.json"
             index_path.write_text(
@@ -326,7 +332,7 @@ class GeneratedShimTest(unittest.TestCase):
                             "name": "websearch",
                             "project_dir": str(project_dir),
                             "package": "websearch",
-                            "entrypoint": "websearch.cli:app",
+                            "entrypoint": "client:main",
                             "client_module": "client.py",
                         }
                     ]
@@ -339,27 +345,12 @@ class GeneratedShimTest(unittest.TestCase):
                 os.pathsep.join(["/opt/centaur", "/opt/extra"]),
             )
 
-            uvx_log = root / "uvx.log"
+            argv_log = root / "argv.log"
             pythonpath_log = root / "pythonpath.log"
             analytics_log = root / "tool-analytics.log"
-            fake_uvx = fake_bin / "uvx"
-            fake_uvx.write_text(
-                "#!/usr/bin/env python3\n"
-                "from pathlib import Path\n"
-                "import os\n"
-                "import sys\n"
-                "Path(os.environ['UVX_LOG']).write_text('\\n'.join(sys.argv[1:]) + '\\n')\n"
-                "Path(os.environ['PYTHONPATH_LOG']).write_text(os.environ.get('PYTHONPATH', ''))\n"
-            )
-            fake_uvx.chmod(0o755)
-
-            path_websearch = fake_bin / "websearch"
-            path_websearch.write_text("#!/bin/sh\nexit 42\n")
-            path_websearch.chmod(0o755)
 
             env = os.environ.copy()
-            env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
-            env["UVX_LOG"] = str(uvx_log)
+            env["ARGV_LOG"] = str(argv_log)
             env["PYTHONPATH_LOG"] = str(pythonpath_log)
             env["PYTHONPATH"] = "existing"
             env["CENTAUR_THREAD_KEY"] = "cli:test-thread"
@@ -381,10 +372,8 @@ class GeneratedShimTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
-                uvx_log.read_text().splitlines(),
+                argv_log.read_text().splitlines(),
                 [
-                    "--from",
-                    str(project_dir),
                     "websearch",
                     "lookup",
                     "sensitive-payload",
@@ -459,10 +448,8 @@ class GeneratedShimTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bin_dir = root / "bin"
-            fake_bin = root / "fake-bin"
             project_dir = root / "data-query-and-viz"
             bin_dir.mkdir()
-            fake_bin.mkdir()
             project_dir.mkdir()
             (project_dir / "__init__.py").write_text("")
             (project_dir / "helper.py").write_text('VALUE = "package-loaded"\n')
@@ -498,21 +485,7 @@ class GeneratedShimTest(unittest.TestCase):
                 str(Path(__file__).resolve().parents[2]),
             )
 
-            fake_uvx = fake_bin / "uvx"
-            fake_uvx.write_text(
-                f"#!{sys.executable}\n"
-                "import subprocess\n"
-                "import sys\n"
-                "\n"
-                "args = sys.argv[1:]\n"
-                "if len(args) < 3 or args[0] != '--from' or args[2] != 'python':\n"
-                "    raise SystemExit(2)\n"
-                "raise SystemExit(subprocess.call([sys.executable, *args[3:]]))\n"
-            )
-            fake_uvx.chmod(0o755)
-
             env = os.environ.copy()
-            env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
             env["CENTAUR_TOOL_ANALYTICS_LOG_PATH"] = "off"
             result = subprocess.run(
                 [
@@ -530,6 +503,58 @@ class GeneratedShimTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), "package-loaded:ok")
+
+    def test_run_loads_project_root_as_declared_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            project_dir = root / "websearch"
+            bin_dir.mkdir()
+            project_dir.mkdir()
+            (project_dir / "__init__.py").write_text("")
+            (project_dir / "helper.py").write_text('VALUE = "package-loaded"\n')
+            (project_dir / "cli.py").write_text(
+                "from pathlib import Path\n"
+                "import os\n"
+                "import sys\n"
+                "from .helper import VALUE\n"
+                "def app():\n"
+                "    Path(os.environ['RESULT_LOG']).write_text(f'{VALUE}:{sys.argv[1]}')\n"
+            )
+
+            index_path = bin_dir / ".centaur-tools.json"
+            index_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "websearch",
+                            "project_dir": str(project_dir),
+                            "package": "websearch",
+                            "entrypoint": "centaur_tool_websearch.cli:app",
+                            "client_module": "client.py",
+                        }
+                    ]
+                )
+                + "\n"
+            )
+            install_tool_shims._write_catalog(
+                bin_dir / "centaur-tools", index_path, ""
+            )
+
+            result_log = root / "result.log"
+            env = os.environ.copy()
+            env["RESULT_LOG"] = str(result_log)
+            env["CENTAUR_TOOL_ANALYTICS_LOG_PATH"] = "off"
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "run", "websearch", "query"],
+                check=False,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result_log.read_text(), "package-loaded:query")
 
 
 class RefreshInstallTest(unittest.TestCase):

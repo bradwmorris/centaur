@@ -574,6 +574,56 @@ def catalog_lock(exclusive=False):
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
+CLI_RUNNER = r'''
+import asyncio
+import importlib
+import importlib.util
+import inspect
+from pathlib import Path
+import sys
+
+project_dir = Path(sys.argv[1])
+entrypoint = sys.argv[2]
+tool_name = sys.argv[3]
+args = sys.argv[4:]
+
+module_name, separator, attribute_path = entrypoint.partition(":")
+if not separator or not module_name or not attribute_path:
+    raise RuntimeError(f"invalid tool entrypoint: {{entrypoint}}")
+
+sys.path.insert(0, str(project_dir))
+try:
+    module = importlib.import_module(module_name)
+except ModuleNotFoundError as exc:
+    package_name = module_name.split(".", 1)[0]
+    package_path = project_dir / "__init__.py"
+    if exc.name != package_name or not package_path.is_file():
+        raise
+    package_spec = importlib.util.spec_from_file_location(
+        package_name,
+        package_path,
+        submodule_search_locations=[str(project_dir)],
+    )
+    if package_spec is None or package_spec.loader is None:
+        raise RuntimeError(f"cannot load tool package from {{package_path}}")
+    package = importlib.util.module_from_spec(package_spec)
+    sys.modules[package_name] = package
+    package_spec.loader.exec_module(package)
+    module = importlib.import_module(module_name)
+
+target = module
+for attribute in attribute_path.split("."):
+    target = getattr(target, attribute)
+
+sys.argv = [tool_name, *args]
+result = target()
+if inspect.isawaitable(result):
+    result = asyncio.run(result)
+if isinstance(result, int):
+    raise SystemExit(result)
+'''
+
+
 CALL_RUNNER = r'''
 import asyncio
 import importlib
@@ -774,7 +824,15 @@ def run_tool(tool, args):
     emit_tool_call_event("tool_call_started", tool, "cli", tool_args=args)
     try:
         returncode = subprocess.call(
-            ["uvx", "--from", str(project_dir), tool["name"], *args],
+            [
+                sys.executable,
+                "-c",
+                CLI_RUNNER,
+                str(project_dir),
+                tool["entrypoint"],
+                tool["name"],
+                *args,
+            ],
             env=tool_env(),
         )
     except Exception:
@@ -806,10 +864,7 @@ def call_tool(tool, method, payload):
     try:
         result = subprocess.run(
             [
-                "uvx",
-                "--from",
-                str(project_dir),
-                "python",
+                sys.executable,
                 "-c",
                 CALL_RUNNER,
                 str(project_dir),
