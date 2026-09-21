@@ -415,8 +415,13 @@ fi
 mkdir -p "$HOME_DIR/uploads"
 
 # ── Copy project skills into workspace (so `skill` tool discovers them) ──────
-WORKSPACE_DIR="$WORKSPACE_DIR" install-tool-shims --refresh-skills \
-    || echo "warning: failed to reload Centaur skills" >&2
+if ! WORKSPACE_DIR="$WORKSPACE_DIR" install-tool-shims --refresh-skills; then
+    if [ -n "${SKILL_ALLOWLIST:-}" ]; then
+        echo "failed to install the selected persona skills" >&2
+        exit 1
+    fi
+    echo "warning: failed to reload Centaur skills" >&2
+fi
 
 # ── Background: refresh repo-cache-backed tools/skills in running sandboxes ───
 case "${CENTAUR_TOOLS_AUTO_RELOAD:-true}" in

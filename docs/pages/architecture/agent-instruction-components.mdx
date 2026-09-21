@@ -37,4 +37,13 @@ The universal base is intentionally small. Specialized policy must be delivered 
 
 Runtime authorization remains authoritative. No persona, overlay, skill, or prompt component can grant a capability.
 
-Persona packages may declare `tool_allowlist` and `tool_blocklist` arrays in their `[tool.centaur]` metadata. These declarations only narrow the authenticated principal's effective tool policy; they cannot broaden it. Application tools remain absent from the initial model-visible catalogue and are resolved through filtered lazy discovery.
+Persona packages may declare `tool_allowlist`, `tool_blocklist`, and
+`skill_allowlist` arrays in their `[tool.centaur]` metadata. Tool declarations
+only narrow the authenticated principal's effective policy; they cannot broaden
+it. A skill allowlist installs and advertises only the named skills, an explicit
+empty list installs none, and a missing selected skill fails sandbox startup.
+When `skill_allowlist` is absent, Centaur preserves the legacy all-skills
+behavior. The workspace `.centaur-skills.json` records the installed skill
+source, source revision when available, and content hash. Application tools
+remain absent from the initial model-visible catalogue and are resolved through
+filtered lazy discovery.

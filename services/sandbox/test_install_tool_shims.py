@@ -146,6 +146,95 @@ class CopyPublishedToolsTest(unittest.TestCase):
             self.assertIn("websearch", scripts)
 
 
+class SkillAllowlistTest(unittest.TestCase):
+    @staticmethod
+    def _skill(root: Path, name: str, content: str) -> None:
+        skill = root / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(content)
+
+    def test_allowlist_installs_only_selected_skills_and_records_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "base"
+            overlay = root / "overlay"
+            workspace = root / "workspace"
+            self._skill(base, "shared", "base")
+            self._skill(base, "base-only", "base-only")
+            self._skill(overlay, "shared", "overlay")
+            self._skill(overlay, "selected", "selected")
+
+            with (
+                mock.patch.dict("os.environ", {"SKILL_ALLOWLIST": "shared,selected"}),
+                mock.patch.object(install_tool_shims, "_skill_sources", return_value=[base, overlay]),
+            ):
+                copied = install_tool_shims._refresh_skill_dirs(workspace)
+
+            skills = workspace / ".agents" / "skills"
+            self.assertEqual(copied, 3)
+            self.assertEqual((skills / "shared" / "SKILL.md").read_text(), "overlay")
+            self.assertTrue((skills / "selected" / "SKILL.md").is_file())
+            self.assertFalse((skills / "base-only").exists())
+            manifest = json.loads(
+                (workspace / install_tool_shims.SKILLS_MANIFEST_NAME).read_text()
+            )
+            self.assertEqual([entry["name"] for entry in manifest], ["selected", "shared"])
+            self.assertEqual(manifest[1]["source_path"], str(overlay / "shared"))
+            self.assertTrue(manifest[1]["content_hash"].startswith("sha256:"))
+
+    def test_explicit_empty_allowlist_removes_stale_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            self._skill(workspace / ".agents" / "skills", "stale", "stale")
+
+            with (
+                mock.patch.dict(
+                    "os.environ",
+                    {"SKILL_ALLOWLIST": install_tool_shims.NO_SKILLS_SENTINEL},
+                ),
+                mock.patch.object(install_tool_shims, "_skill_sources", return_value=[]),
+            ):
+                install_tool_shims._refresh_skill_dirs(workspace)
+
+            self.assertEqual(list((workspace / ".agents" / "skills").iterdir()), [])
+            self.assertEqual(
+                json.loads((workspace / install_tool_shims.SKILLS_MANIFEST_NAME).read_text()),
+                [],
+            )
+
+    def test_missing_allowlisted_skill_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            source.mkdir()
+            workspace = root / "workspace"
+
+            with (
+                mock.patch.dict("os.environ", {"SKILL_ALLOWLIST": "missing"}),
+                mock.patch.object(install_tool_shims, "_skill_sources", return_value=[source]),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "missing"):
+                    install_tool_shims._refresh_skill_dirs(workspace)
+
+    def test_unset_allowlist_preserves_all_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            workspace = root / "workspace"
+            self._skill(source, "one", "one")
+            self._skill(source, "two", "two")
+
+            with (
+                mock.patch.dict("os.environ", {}, clear=True),
+                mock.patch.object(install_tool_shims, "_skill_sources", return_value=[source]),
+            ):
+                install_tool_shims._refresh_skill_dirs(workspace)
+
+            self.assertTrue((workspace / ".agents" / "skills" / "one").is_dir())
+            self.assertTrue((workspace / ".agents" / "skills" / "two").is_dir())
+
+
 class GeneratedShimTest(unittest.TestCase):
     def test_tool_shim_delegates_to_centaur_tools_exec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
