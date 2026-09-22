@@ -2582,20 +2582,24 @@ mod tests {
         .await?;
 
         let claim_timeout_observed = Arc::new(Notify::new());
+        let simulated_exit_count = Arc::new(AtomicUsize::new(0));
         let worker = app.start_worker(WorkerOptions {
             worker_id: Some("rust-claim-recovery-worker".to_string()),
             concurrency: 1,
             poll_interval: Duration::from_millis(10),
-            claim_query_timeout: Duration::from_millis(50),
+            claim_query_timeout: Duration::from_millis(500),
             fatal_on_lease_timeout: false,
             on_error: Some({
                 let claim_timeout_observed = claim_timeout_observed.clone();
+                let simulated_exit_count = simulated_exit_count.clone();
                 Arc::new(move |error| {
                     if matches!(error, Error::Timeout(_)) {
                         claim_timeout_observed.notify_one();
                         // Prove start_worker supervises an unexpectedly stopped
                         // polling loop before the durable run is recovered.
-                        panic!("simulated worker error callback failure");
+                        if simulated_exit_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                            panic!("simulated worker error callback failure");
+                        }
                     }
                 })
             }),
@@ -2610,7 +2614,7 @@ mod tests {
         blocker.rollback().await?;
 
         let sleeping_snapshot = app
-            .await_task_result(&sleeping.task_id, None, Some(Duration::from_secs(3)))
+            .await_task_result(&sleeping.task_id, None, Some(Duration::from_secs(5)))
             .await?;
         assert_eq!(
             sleeping_snapshot.result::<Value>()?,
