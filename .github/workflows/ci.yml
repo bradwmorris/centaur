@@ -164,7 +164,11 @@ jobs:
 
   rust-api:
     name: Rust API fmt, clippy, and tests
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'bradwmorris/centaur' && 'ubuntu-24.04' || 'depot-ubuntu-24.04-16' }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
     needs: ci_changes
     if: needs.ci_changes.outputs.rust_api == 'true'
     steps:
