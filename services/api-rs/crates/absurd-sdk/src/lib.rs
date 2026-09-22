@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use futures::{future::BoxFuture, FutureExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use sqlx::{postgres::PgPoolOptions, types::Json, PgPool, Row};
+use sqlx::{postgres::PgPoolOptions, types::Json, Executor, PgPool, Postgres, Row};
 use tokio::{
     sync::{watch, Semaphore},
     task::{JoinHandle, JoinSet},
@@ -28,6 +28,7 @@ const MAX_QUEUE_NAME_LENGTH: usize = 57;
 const DEFAULT_QUEUE_NAME: &str = "default";
 const DEFAULT_MAX_ATTEMPTS: i32 = 5;
 const DEFAULT_CLAIM_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_CLAIM_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const INITIAL_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_BACKOFF: Duration = Duration::from_secs(1);
@@ -371,6 +372,9 @@ impl Default for WorkBatchOptions {
 pub struct WorkerOptions {
     pub worker_id: Option<String>,
     pub claim_timeout: Duration,
+    /// Bounds one database claim poll. A timed-out poll is cancelled and retried;
+    /// the durable run remains pending or sleeping for the next successful poll.
+    pub claim_query_timeout: Duration,
     pub batch_size: Option<usize>,
     pub concurrency: usize,
     pub poll_interval: Duration,
@@ -383,6 +387,7 @@ impl Default for WorkerOptions {
         Self {
             worker_id: None,
             claim_timeout: DEFAULT_CLAIM_TIMEOUT,
+            claim_query_timeout: DEFAULT_CLAIM_QUERY_TIMEOUT,
             batch_size: None,
             concurrency: 1,
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -738,6 +743,17 @@ impl Client {
     }
 
     pub async fn claim_tasks(&self, options: WorkBatchOptions) -> Result<Vec<ClaimedTask>> {
+        self.claim_tasks_with(&self.pool, options).await
+    }
+
+    async fn claim_tasks_with<'e, E>(
+        &self,
+        executor: E,
+        options: WorkBatchOptions,
+    ) -> Result<Vec<ClaimedTask>>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         let claim_timeout = duration_seconds(options.claim_timeout);
         let batch_size = i32::try_from(options.batch_size.max(1)).unwrap_or(i32::MAX);
         let rows = sqlx::query(
@@ -763,10 +779,50 @@ impl Client {
         })
         .bind(claim_timeout)
         .bind(batch_size)
-        .fetch_all(&self.pool)
+        .fetch_all(executor)
         .await?;
 
         rows.into_iter().map(claimed_task_from_row).collect()
+    }
+
+    async fn claim_tasks_bounded(
+        &self,
+        options: WorkBatchOptions,
+        query_timeout: Duration,
+    ) -> Result<Vec<ClaimedTask>> {
+        let worker_id = options.worker_id.clone();
+        let timeout_error = || claim_timeout_error(&worker_id, query_timeout);
+        let mut transaction = tokio::time::timeout(query_timeout, self.pool.begin())
+            .await
+            .map_err(|_| timeout_error())??;
+        let statement_timeout = format!("{}ms", query_timeout.as_millis().max(1));
+        tokio::time::timeout(
+            query_timeout,
+            sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+                .bind(statement_timeout)
+                .execute(&mut *transaction),
+        )
+        .await
+        .map_err(|_| timeout_error())??;
+
+        let claim = tokio::time::timeout(
+            query_timeout.saturating_add(Duration::from_secs(1)),
+            self.claim_tasks_with(&mut *transaction, options),
+        )
+        .await
+        .map_err(|_| timeout_error())?;
+
+        match claim {
+            Ok(tasks) => {
+                transaction.commit().await?;
+                Ok(tasks)
+            }
+            Err(Error::Sqlx(error)) if is_statement_timeout(&error) => {
+                let _ = transaction.rollback().await;
+                Err(timeout_error())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn work_batch(&self, options: WorkBatchOptions) -> Result<()> {
@@ -781,7 +837,8 @@ impl Client {
     pub fn start_worker(&self, options: WorkerOptions) -> Worker {
         let (shutdown, shutdown_rx) = watch::channel(false);
         let client = self.clone();
-        let join = tokio::spawn(async move { client.worker_loop(options, shutdown_rx).await });
+        let join =
+            tokio::spawn(async move { supervise_worker(client, options, shutdown_rx).await });
         Worker { shutdown, join }
     }
 
@@ -804,6 +861,9 @@ impl Client {
         if options.claim_timeout.is_zero() {
             options.claim_timeout = DEFAULT_CLAIM_TIMEOUT;
         }
+        if options.claim_query_timeout.is_zero() {
+            options.claim_query_timeout = DEFAULT_CLAIM_QUERY_TIMEOUT;
+        }
         let worker_id = options.worker_id.clone().unwrap_or_else(default_worker_id);
         let on_error = options.on_error.clone().unwrap_or_else(|| {
             Arc::new(|err| {
@@ -820,7 +880,7 @@ impl Client {
                 }
             }
 
-            if *shutdown.borrow() {
+            if *shutdown.borrow() || shutdown.has_changed().is_err() {
                 break;
             }
 
@@ -828,7 +888,7 @@ impl Client {
             if available == 0 {
                 tokio::select! {
                     changed = shutdown.changed() => {
-                        if changed.is_ok() && *shutdown.borrow() {
+                        if changed.is_err() || *shutdown.borrow() {
                             break;
                         }
                     }
@@ -848,11 +908,14 @@ impl Client {
                 .min(available)
                 .max(1);
             let tasks = match self
-                .claim_tasks(WorkBatchOptions {
-                    worker_id: worker_id.clone(),
-                    claim_timeout: options.claim_timeout,
-                    batch_size,
-                })
+                .claim_tasks_bounded(
+                    WorkBatchOptions {
+                        worker_id: worker_id.clone(),
+                        claim_timeout: options.claim_timeout,
+                        batch_size,
+                    },
+                    options.claim_query_timeout,
+                )
                 .await
             {
                 Ok(tasks) => tasks,
@@ -860,7 +923,7 @@ impl Client {
                     on_error(err);
                     tokio::select! {
                         changed = shutdown.changed() => {
-                            if changed.is_ok() && *shutdown.borrow() {
+                            if changed.is_err() || *shutdown.borrow() {
                                 break;
                             }
                         }
@@ -873,7 +936,7 @@ impl Client {
             if tasks.is_empty() {
                 tokio::select! {
                     changed = shutdown.changed() => {
-                        if changed.is_ok() && *shutdown.borrow() {
+                        if changed.is_err() || *shutdown.borrow() {
                             break;
                         }
                     }
@@ -1115,6 +1178,72 @@ impl Client {
         .await?;
         Ok(())
     }
+}
+
+async fn supervise_worker(
+    client: Client,
+    options: WorkerOptions,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    let on_error = options.on_error.clone().unwrap_or_else(|| {
+        Arc::new(|err| {
+            eprintln!("[absurd] worker error: {err}");
+        })
+    });
+
+    loop {
+        let run = AssertUnwindSafe(
+            client
+                .clone()
+                .worker_loop(options.clone(), shutdown.clone()),
+        )
+        .catch_unwind()
+        .await;
+
+        if *shutdown.borrow() || shutdown.has_changed().is_err() {
+            return match run {
+                Ok(result) => result,
+                Err(_) => Ok(()),
+            };
+        }
+
+        let error = match run {
+            Ok(Ok(())) => Error::InvalidOptions(
+                "workflow worker stopped unexpectedly; restarting".to_string(),
+            ),
+            Ok(Err(error)) => error,
+            Err(payload) => Error::InvalidOptions(format!(
+                "workflow worker panicked: {}; restarting",
+                panic_message(payload.as_ref())
+            )),
+        };
+        if std::panic::catch_unwind(AssertUnwindSafe(|| on_error(error))).is_err() {
+            eprintln!("[absurd] worker error callback panicked; restarting worker");
+        }
+
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(());
+                }
+            }
+            _ = sleep(options.poll_interval.max(Duration::from_millis(1))) => {}
+        }
+    }
+}
+
+fn claim_timeout_error(worker_id: &str, query_timeout: Duration) -> Error {
+    Error::Timeout(format!(
+        "workflow worker {worker_id:?} claim query timed out after {query_timeout:?}; retrying without replacing the durable run"
+    ))
+}
+
+fn is_statement_timeout(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(database_error)
+            if database_error.code().as_deref() == Some("57014")
+    )
 }
 
 #[derive(Clone)]
@@ -2142,6 +2271,15 @@ mod tests {
         assert!(deterministic_jitter("run-a") <= UNKNOWN_TASK_DEFER_JITTER_SECONDS);
     }
 
+    #[test]
+    fn claim_query_timeout_is_actionable_and_preserves_retry_intent() {
+        let error = claim_timeout_error("test-worker", Duration::from_millis(5));
+        let message = error.to_string();
+        assert!(message.contains("test-worker"));
+        assert!(message.contains("claim query timed out"));
+        assert!(message.contains("retrying without replacing the durable run"));
+    }
+
     #[tokio::test]
     async fn integration_processes_task_when_database_url_is_set() -> Result<()> {
         let Some(pool) = optional_test_pool().await? else {
@@ -2436,6 +2574,103 @@ mod tests {
             .await_task_result(&quick.task_id, None, Some(Duration::from_secs(2)))
             .await?;
         assert_eq!(snapshot.result::<Value>()?, Some(json!({"ok": true})));
+
+        drop(worker);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_worker_recovers_from_blocked_claim_and_keeps_sleepers_and_waiters_bounded_when_database_url_is_set(
+    ) -> Result<()> {
+        let Some(pool) = optional_test_pool().await? else {
+            return Ok(());
+        };
+
+        let queue = unique_queue("rust_claim_recovery");
+        let app = Client::from_pool_with_options(
+            pool.clone(),
+            ClientOptions {
+                queue_name: queue.clone(),
+                ..ClientOptions::default()
+            },
+        )?;
+        app.create_queue(None, Default::default()).await?;
+
+        app.register_task("sleep-briefly", |_params: Value, ctx| async move {
+            ctx.sleep_for("brief-pause", Duration::from_millis(50))
+                .await?;
+            Ok(json!({"slept": true}))
+        })?;
+        app.register_task("wait-indefinitely", |_params: Value, ctx| async move {
+            let _: Value = ctx
+                .await_event("event-that-is-never-emitted", AwaitEventOptions::default())
+                .await?;
+            Ok(json!({"unexpected": true}))
+        })?;
+        app.register_task("quick", |_params: Value, _ctx| async move {
+            Ok(json!({"ok": true}))
+        })?;
+
+        let sleeping = app
+            .spawn("sleep-briefly", json!({}), Default::default())
+            .await?;
+
+        // Reproduce transient database pressure after the run exists. An
+        // exclusive relation lock deterministically blocks claim_task's run
+        // scan; the worker must bound that one poll rather than becoming
+        // permanently silent.
+        let mut blocker = pool.begin().await?;
+        sqlx::query(&format!(
+            "LOCK TABLE absurd.r_{queue} IN ACCESS EXCLUSIVE MODE"
+        ))
+        .execute(&mut *blocker)
+        .await?;
+
+        let claim_timeout_observed = Arc::new(Notify::new());
+        let worker = app.start_worker(WorkerOptions {
+            worker_id: Some("rust-claim-recovery-worker".to_string()),
+            concurrency: 1,
+            poll_interval: Duration::from_millis(10),
+            claim_query_timeout: Duration::from_millis(500),
+            fatal_on_lease_timeout: false,
+            on_error: Some({
+                let claim_timeout_observed = claim_timeout_observed.clone();
+                Arc::new(move |error| {
+                    if matches!(error, Error::Timeout(_)) {
+                        claim_timeout_observed.notify_one();
+                    }
+                })
+            }),
+            ..WorkerOptions::default()
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), claim_timeout_observed.notified())
+            .await
+            .map_err(|_| {
+                Error::Timeout("timed out waiting for blocked claim detection".to_string())
+            })?;
+        blocker.rollback().await?;
+
+        let sleeping_snapshot = app
+            .await_task_result(&sleeping.task_id, None, Some(Duration::from_secs(5)))
+            .await?;
+        assert_eq!(
+            sleeping_snapshot.result::<Value>()?,
+            Some(json!({"slept": true}))
+        );
+
+        let waiting = app
+            .spawn("wait-indefinitely", json!({}), Default::default())
+            .await?;
+        let quick = app.spawn("quick", json!({}), Default::default()).await?;
+        let quick_snapshot = app
+            .await_task_result(&quick.task_id, None, Some(Duration::from_secs(2)))
+            .await?;
+        assert_eq!(quick_snapshot.result::<Value>()?, Some(json!({"ok": true})));
+        assert!(matches!(
+            app.fetch_task_result(&waiting.task_id, None).await?,
+            Some(TaskResultSnapshot::Sleeping)
+        ));
 
         drop(worker);
         Ok(())
