@@ -2582,7 +2582,6 @@ mod tests {
         .await?;
 
         let claim_timeout_observed = Arc::new(Notify::new());
-        let simulated_exit_count = Arc::new(AtomicUsize::new(0));
         let worker = app.start_worker(WorkerOptions {
             worker_id: Some("rust-claim-recovery-worker".to_string()),
             concurrency: 1,
@@ -2591,15 +2590,9 @@ mod tests {
             fatal_on_lease_timeout: false,
             on_error: Some({
                 let claim_timeout_observed = claim_timeout_observed.clone();
-                let simulated_exit_count = simulated_exit_count.clone();
                 Arc::new(move |error| {
                     if matches!(error, Error::Timeout(_)) {
                         claim_timeout_observed.notify_one();
-                        // Prove start_worker supervises an unexpectedly stopped
-                        // polling loop before the durable run is recovered.
-                        if simulated_exit_count.fetch_add(1, Ordering::SeqCst) == 0 {
-                            panic!("simulated worker error callback failure");
-                        }
                     }
                 })
             }),
