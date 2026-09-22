@@ -174,8 +174,13 @@ impl CuratorInferenceRuntime {
             .sandbox
             .create_running_io(self.inner.spec.clone())
             .await?;
+        let timeout = if request.output_schema == memory_maintenance_schema() {
+            self.inner.timeout.min(Duration::from_secs(60))
+        } else {
+            self.inner.timeout
+        };
         let result = tokio::time::timeout(
-            self.inner.timeout,
+            timeout,
             run_inference(io, &request, &execution_id, started_at),
         )
         .await;
@@ -188,7 +193,7 @@ impl CuratorInferenceRuntime {
             Err(_) => {
                 return Err(ApiError::ServiceUnavailable(format!(
                     "curator inference timed out after {} seconds",
-                    self.inner.timeout.as_secs()
+                    timeout.as_secs()
                 )));
             }
         };
@@ -239,6 +244,30 @@ impl CuratorInferenceRuntime {
     }
 }
 
+fn memory_maintenance_schema() -> Value {
+    fn variant(action: &str, fields: &[(&str, Value)]) -> Value {
+        let mut props = serde_json::Map::new();
+        props.insert("action".into(), json!({"type":"string","enum":[action]}));
+        props.insert("reason".into(), json!({"type":"string"}));
+        let mut required = vec!["action", "reason"];
+        for (key, schema) in fields {
+            props.insert((*key).into(), schema.clone());
+            required.push(key);
+        }
+        json!({"type":"object","additionalProperties":false,"required":required,"properties":props})
+    }
+    let text = json!({"type":"string"});
+    json!({"type":"object","additionalProperties":false,"required":["changes"],"properties":{
+        "changes":{"type":"array","maxItems":20,"items":{"anyOf":[
+            variant("rewrite",&[("object_id",text.clone()),("title",text.clone()),("description",text.clone())]),
+            variant("retire",&[("object_id",text.clone())]),
+            variant("merge",&[("object_id",text.clone()),("survivor_id",text.clone())]),
+            variant("disconnect",&[("connection_id",text.clone())]),
+            variant("connect",&[("object_id",text.clone()),("target_id",text.clone()),("kind",text.clone()),("description",text)])
+        ]}}
+    }})
+}
+
 fn validate_request(request: &CuratorInferenceRequest) -> Result<(), ApiError> {
     let request_id = request.request_id.trim();
     if request_id.is_empty() || request_id.len() > 128 {
@@ -266,9 +295,16 @@ fn validate_request(request: &CuratorInferenceRequest) -> Result<(), ApiError> {
             "output_schema must be a JSON object".to_owned(),
         ));
     }
-    if request.output_schema != memory_only_curator_schema() {
+    if request.output_schema != memory_only_curator_schema()
+        && request.output_schema != memory_maintenance_schema()
+    {
         return Err(ApiError::BadRequest(
             "output_schema must be the dedicated memory-only Curator plan contract".to_owned(),
+        ));
+    }
+    if request.output_schema == memory_maintenance_schema() && input_bytes > 28_000 {
+        return Err(ApiError::PayloadTooLarge(
+            "maintenance input exceeds 28000 bytes".into(),
         ));
     }
     if !matches!(
@@ -328,6 +364,11 @@ async fn run_inference(
         .await
         .map_err(|error| ApiError::Internal(format!("flush curator sandbox input: {error}")))?;
 
+    let output_limit = if request.output_schema == memory_maintenance_schema() {
+        8_000
+    } else {
+        MAX_OUTPUT_BYTES
+    };
     let mut lines = BufReader::new(stdout).lines();
     let mut answer = String::new();
     let mut observed_usage = None;
@@ -341,7 +382,7 @@ async fn run_inference(
                 "curator sandbox ended before turn completion".to_owned(),
             ));
         };
-        if line.len() > MAX_OUTPUT_BYTES || answer.len() > MAX_OUTPUT_BYTES {
+        if line.len() > MAX_OUTPUT_BYTES || answer.len() > output_limit {
             return Err(ApiError::PayloadTooLarge(
                 "curator model output exceeded its byte limit".to_owned(),
             ));
@@ -393,6 +434,11 @@ async fn run_inference(
         }
     };
     stderr_task.abort();
+    if answer.len() > output_limit {
+        return Err(ApiError::PayloadTooLarge(
+            "curator output exceeded its byte limit".into(),
+        ));
+    }
     let output = serde_json::from_str(answer.trim()).map_err(|_| {
         ApiError::ServiceUnavailable("curator model returned invalid JSON".to_owned())
     })?;
@@ -442,6 +488,24 @@ mod tests {
             output_schema: memory_only_curator_schema(),
             reasoning_effort: "low".to_owned(),
         }
+    }
+
+    #[test]
+    fn maintenance_is_an_exact_bounded_second_schema() {
+        let mut value = request();
+        value.output_schema = memory_maintenance_schema();
+        assert!(validate_request(&value).is_ok());
+        value.input = "x".repeat(28_001);
+        assert!(matches!(
+            validate_request(&value),
+            Err(ApiError::PayloadTooLarge(_))
+        ));
+        value.input = "evidence".into();
+        value.output_schema["additionalProperties"] = json!(true);
+        assert!(matches!(
+            validate_request(&value),
+            Err(ApiError::BadRequest(_))
+        ));
     }
 
     #[test]
