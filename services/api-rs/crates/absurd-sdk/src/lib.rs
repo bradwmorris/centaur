@@ -2570,15 +2570,15 @@ mod tests {
             .spawn("sleep-briefly", json!({}), Default::default())
             .await?;
 
-        // Reproduce transient database pressure after the run exists. claim_task
-        // can lock the run and then wait on this task row; the worker must bound
-        // that one poll rather than becoming permanently silent.
+        // Reproduce transient database pressure after the run exists. An
+        // exclusive relation lock deterministically blocks claim_task's run
+        // scan; the worker must bound that one poll rather than becoming
+        // permanently silent.
         let mut blocker = pool.begin().await?;
         sqlx::query(&format!(
-            "SELECT task_id FROM absurd.t_{queue} WHERE task_id = $1::uuid FOR UPDATE"
+            "LOCK TABLE absurd.r_{queue} IN ACCESS EXCLUSIVE MODE"
         ))
-        .bind(&sleeping.task_id)
-        .fetch_one(&mut *blocker)
+        .execute(&mut *blocker)
         .await?;
 
         let claim_timeout_observed = Arc::new(Notify::new());
