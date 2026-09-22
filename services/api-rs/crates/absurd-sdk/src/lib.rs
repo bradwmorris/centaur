@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use futures::{future::BoxFuture, FutureExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use sqlx::{postgres::PgPoolOptions, types::Json, PgPool, Row};
+use sqlx::{postgres::PgPoolOptions, types::Json, Executor, PgPool, Postgres, Row};
 use tokio::{
     sync::{watch, Semaphore},
     task::{JoinHandle, JoinSet},
@@ -743,6 +743,17 @@ impl Client {
     }
 
     pub async fn claim_tasks(&self, options: WorkBatchOptions) -> Result<Vec<ClaimedTask>> {
+        self.claim_tasks_with(&self.pool, options).await
+    }
+
+    async fn claim_tasks_with<'e, E>(
+        &self,
+        executor: E,
+        options: WorkBatchOptions,
+    ) -> Result<Vec<ClaimedTask>>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         let claim_timeout = duration_seconds(options.claim_timeout);
         let batch_size = i32::try_from(options.batch_size.max(1)).unwrap_or(i32::MAX);
         let rows = sqlx::query(
@@ -768,10 +779,50 @@ impl Client {
         })
         .bind(claim_timeout)
         .bind(batch_size)
-        .fetch_all(&self.pool)
+        .fetch_all(executor)
         .await?;
 
         rows.into_iter().map(claimed_task_from_row).collect()
+    }
+
+    async fn claim_tasks_bounded(
+        &self,
+        options: WorkBatchOptions,
+        query_timeout: Duration,
+    ) -> Result<Vec<ClaimedTask>> {
+        let worker_id = options.worker_id.clone();
+        let timeout_error = || claim_timeout_error(&worker_id, query_timeout);
+        let mut transaction = tokio::time::timeout(query_timeout, self.pool.begin())
+            .await
+            .map_err(|_| timeout_error())??;
+        let statement_timeout = format!("{}ms", query_timeout.as_millis().max(1));
+        tokio::time::timeout(
+            query_timeout,
+            sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+                .bind(statement_timeout)
+                .execute(&mut *transaction),
+        )
+        .await
+        .map_err(|_| timeout_error())??;
+
+        let claim = tokio::time::timeout(
+            query_timeout.saturating_add(Duration::from_secs(1)),
+            self.claim_tasks_with(&mut *transaction, options),
+        )
+        .await
+        .map_err(|_| timeout_error())?;
+
+        match claim {
+            Ok(tasks) => {
+                transaction.commit().await?;
+                Ok(tasks)
+            }
+            Err(Error::Sqlx(error)) if is_statement_timeout(&error) => {
+                let _ = transaction.rollback().await;
+                Err(timeout_error())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn work_batch(&self, options: WorkBatchOptions) -> Result<()> {
@@ -856,16 +907,16 @@ impl Client {
                 .unwrap_or(options.concurrency)
                 .min(available)
                 .max(1);
-            let tasks = match claim_with_timeout(
-                &worker_id,
-                options.claim_query_timeout,
-                self.claim_tasks(WorkBatchOptions {
-                    worker_id: worker_id.clone(),
-                    claim_timeout: options.claim_timeout,
-                    batch_size,
-                }),
-            )
-            .await
+            let tasks = match self
+                .claim_tasks_bounded(
+                    WorkBatchOptions {
+                        worker_id: worker_id.clone(),
+                        claim_timeout: options.claim_timeout,
+                        batch_size,
+                    },
+                    options.claim_query_timeout,
+                )
+                .await
             {
                 Ok(tasks) => tasks,
                 Err(err) => {
@@ -1181,17 +1232,18 @@ async fn supervise_worker(
     }
 }
 
-async fn claim_with_timeout<T, F>(worker_id: &str, query_timeout: Duration, claim: F) -> Result<T>
-where
-    F: Future<Output = Result<T>>,
-{
-    tokio::time::timeout(query_timeout, claim)
-        .await
-        .map_err(|_| {
-            Error::Timeout(format!(
-                "workflow worker {worker_id:?} claim query timed out after {query_timeout:?}; retrying without replacing the durable run"
-            ))
-        })?
+fn claim_timeout_error(worker_id: &str, query_timeout: Duration) -> Error {
+    Error::Timeout(format!(
+        "workflow worker {worker_id:?} claim query timed out after {query_timeout:?}; retrying without replacing the durable run"
+    ))
+}
+
+fn is_statement_timeout(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(database_error)
+            if database_error.code().as_deref() == Some("57014")
+    )
 }
 
 #[derive(Clone)]
@@ -2219,16 +2271,9 @@ mod tests {
         assert!(deterministic_jitter("run-a") <= UNKNOWN_TASK_DEFER_JITTER_SECONDS);
     }
 
-    #[tokio::test]
-    async fn claim_query_timeout_is_actionable_and_preserves_retry_intent() {
-        let result = claim_with_timeout(
-            "test-worker",
-            Duration::from_millis(5),
-            std::future::pending::<Result<()>>(),
-        )
-        .await;
-
-        let error = result.expect_err("pending claim should time out");
+    #[test]
+    fn claim_query_timeout_is_actionable_and_preserves_retry_intent() {
+        let error = claim_timeout_error("test-worker", Duration::from_millis(5));
         let message = error.to_string();
         assert!(message.contains("test-worker"));
         assert!(message.contains("claim query timed out"));
