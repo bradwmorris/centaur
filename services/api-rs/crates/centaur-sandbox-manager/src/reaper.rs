@@ -13,8 +13,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use centaur_sandbox_core::ObservedSandbox;
 use centaur_sandbox_core::SandboxResult;
+use centaur_sandbox_core::{ObservedSandbox, SandboxStatus};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
 
@@ -45,6 +45,12 @@ pub struct SandboxReaper {
     config: SandboxReaperConfig,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReapAction {
+    Pause,
+    Stop,
+}
+
 impl SandboxReaper {
     pub fn new(manager: Arc<SandboxManager>, config: SandboxReaperConfig) -> Self {
         Self { manager, config }
@@ -68,22 +74,26 @@ impl SandboxReaper {
         });
     }
 
-    /// Sweep once and return how many sandboxes were stopped. A failed stop is
-    /// logged and skipped so one wedged sandbox cannot stall the sweep.
+    /// Sweep once and return how many sandboxes were cleaned up. A failed
+    /// operation is logged and skipped so one wedged sandbox cannot stall the sweep.
     pub async fn reap_once(&self) -> SandboxResult<usize> {
         let now = SystemTime::now();
         let mut reaped = 0;
         for observed in self.manager.list_observed().await? {
-            let Some(reason) = reap_reason(&observed, now, &self.config) else {
+            let Some((action, reason)) = reap_action(&observed, now, &self.config) else {
                 continue;
             };
-            match self.manager.stop(&observed.id).await {
+            let result = match action {
+                ReapAction::Pause => self.manager.pause(&observed.id).await,
+                ReapAction::Stop => self.manager.stop(&observed.id).await,
+            };
+            match result {
                 Ok(()) => {
                     reaped += 1;
                     info!(
                         sandbox_id = %observed.id.as_str(),
                         reason,
-                        "reaped expired sandbox"
+                        "reaped sandbox"
                     );
                 }
                 Err(error) => {
@@ -91,7 +101,7 @@ impl SandboxReaper {
                         sandbox_id = %observed.id.as_str(),
                         reason,
                         %error,
-                        "failed to reap expired sandbox"
+                        "failed to reap sandbox"
                     );
                 }
             }
@@ -105,6 +115,21 @@ impl SandboxReaper {
         }
         Ok(reaped)
     }
+}
+
+fn reap_action(
+    observed: &ObservedSandbox,
+    now: SystemTime,
+    config: &SandboxReaperConfig,
+) -> Option<(ReapAction, &'static str)> {
+    // A failed or completed agent-k8s workload Pod reports Stopped while its
+    // Sandbox CR and proxy still exist. Pause removes the dead Pod and proxy
+    // without deleting the state volume; a later max-lifetime sweep can stop
+    // the suspended CR.
+    if observed.backend == "agent-sandbox-k8s" && observed.status == SandboxStatus::Stopped {
+        return Some((ReapAction::Pause, "terminal_pod"));
+    }
+    reap_reason(observed, now, config).map(|reason| (ReapAction::Stop, reason))
 }
 
 fn reap_reason(
@@ -184,6 +209,35 @@ mod tests {
         let reason = reap_reason(&sandbox, now, &config(Some(Duration::from_secs(86_400))));
 
         assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn pauses_terminal_k8s_pod_without_deleting_its_state() {
+        let now = SystemTime::now();
+        let sandbox = ObservedSandbox::new(
+            "sandbox-1",
+            "agent-sandbox-k8s",
+            centaur_sandbox_core::SandboxStatus::Stopped,
+        )
+        .with_created_at(Some(now - Duration::from_secs(100_000)));
+
+        assert_eq!(
+            reap_action(&sandbox, now, &config(Some(Duration::from_secs(60)))),
+            Some((ReapAction::Pause, "terminal_pod"))
+        );
+        assert_eq!(
+            reap_action(
+                &ObservedSandbox::new(
+                    "sandbox-1",
+                    "agent-sandbox-k8s",
+                    centaur_sandbox_core::SandboxStatus::Suspended,
+                )
+                .with_created_at(Some(now - Duration::from_secs(100_000))),
+                now,
+                &config(Some(Duration::from_secs(60))),
+            ),
+            Some((ReapAction::Stop, "max_lifetime"))
+        );
     }
 
     #[test]
