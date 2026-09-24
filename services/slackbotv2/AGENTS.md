@@ -81,3 +81,15 @@ source-thread notice after execution/render completion. An uncertain Slack write
 with no discoverable receipt stays pending for operator reconciliation instead of
 posting again. It is not evidence of task completion. No task schema, scheduler or
 legacy-history migration is included.
+
+Routine execution is opt-in: set `routineIngestUrl` in the dispatch config and
+provide `SLACKBOTV2_TASK_DISPATCH_ROUTINE_TOKEN` separately. The trusted token
+must stay in the transport; never add it to project tools or sandbox grants.
+The existing recovery loop polls Context's `/api/v2/ingest/routines/claim`,
+reuses the occurrence UUID across retries, checks the current definition and
+project boundary, then starts a fresh configured execution session. Routine
+runs never claim or complete the parent Task. A returned run defaults to Review
+without overwriting the execution thread's explicit terminal result.
+
+Run tests with the Bun version pinned in this service's Dockerfile. Older Bun
+versions can hang streaming HTTP fixtures and produce misleading failures.

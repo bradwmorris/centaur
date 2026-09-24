@@ -378,5 +378,6 @@ function taskDispatchEnv(): TaskDispatchConfig | undefined {
     const defaults = parseChannelDefaults(optionalEnv('SLACKBOTV2_CHANNEL_DEFAULTS'))
     if (defaults[route.channel]?.personaId !== route.persona) throw new Error('Dispatch route must match the channel persona')
   }
-  return { ...value, secret: requiredEnv('SLACKBOTV2_TASK_DISPATCH_SECRET'), contextToken: requiredEnv('SLACKBOTV2_TASK_DISPATCH_CONTEXT_TOKEN') }
+  if (value.routineIngestUrl && typeof value.routineIngestUrl !== 'string') throw new Error('Invalid Routine ingest URL')
+  return { ...value, routineIngestToken: value.routineIngestUrl ? requiredEnv('SLACKBOTV2_TASK_DISPATCH_ROUTINE_TOKEN') : undefined, secret: requiredEnv('SLACKBOTV2_TASK_DISPATCH_SECRET'), contextToken: requiredEnv('SLACKBOTV2_TASK_DISPATCH_CONTEXT_TOKEN') }
 }

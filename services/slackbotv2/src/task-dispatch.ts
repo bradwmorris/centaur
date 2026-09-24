@@ -6,6 +6,8 @@ export type TaskDispatchConfig = {
   secret: string
   contextUrl: string
   contextToken: string
+  routineIngestUrl?: string
+  routineIngestToken?: string
   ownerIds: string[]
   userId: string
   teamId: string
@@ -16,6 +18,7 @@ export type TaskDispatchConfig = {
   originChannels: string[]
 }
 export type DispatchRecord = {
+  routineRunId?: string
   id: string; taskId: string; revision: number; title: string; brief: string
   project: string; originChannel: string; originTs: string; targetChannel: string
   handoffAttempted?: boolean; postAttempted?: boolean; noticeAttempted?: boolean; targetTs?: string; url?: string; handedOff?: boolean; notified?: boolean; createdAt: number
@@ -44,7 +47,7 @@ export function taskProject(brief: string): string {
 }
 export function validateDispatchTask(task: TaskRecord, config: TaskDispatchConfig): { project: string; brief: string } {
   const f = task.subtype
-  if (task.object.archived_at || f.execution_actor_id || !['backlog', 'todo', 'review'].includes(String(f.status))) throw new Error('Task is not available for a new execution; inspect its status or current claim.')
+  if (task.object.archived_at || f.execution_actor_id || !['todo', 'review'].includes(String(f.status))) throw new Error('Task is not available for a new execution; inspect its status or current claim.')
   if (!config.ownerIds.includes(String(f.owner_object_id))) throw new Error('Task owner is outside this dispatch capability.')
   if (f.agent_suitable !== true) throw new Error('Task is not marked suitable for agent execution.')
   if (!f.due_at || !Number.isFinite(Date.parse(String(f.due_at)))) throw new Error('Task needs an agreed due date.')
@@ -75,6 +78,57 @@ export class TaskDispatcher {
     const task = body.data?.objects?.find(item => item.object.id === taskId)
     if (!task) throw new Error('Canonical task was not returned by Context.')
     return task
+  }
+
+  private async routineApi(path: string, method: string, body?: unknown): Promise<any> {
+    if (!this.config.routineIngestUrl || !this.config.routineIngestToken) throw new Error('Routine execution is not configured.')
+    const response = await (this.ports.fetch ?? fetch)(`${this.config.routineIngestUrl.replace(/\/$/, '')}/api/v2/ingest/${path}`, {
+      method, headers: { Authorization: `Bearer ${this.config.routineIngestToken}`, 'Content-Type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(10000)
+    })
+    if (!response.ok) throw new Error(`Routine request failed (${response.status}).`)
+    return (await response.json() as { data: unknown }).data
+  }
+
+  private async pollRoutines(): Promise<void> {
+    if (!this.config.routineIngestUrl) return
+    const runs = await this.routineApi('routines/claim', 'POST') as Array<{ id: string; task_id: string; definition_revision: number; status: string }>
+    for (const run of runs) {
+      const mutex = `task-dispatch:lock:${run.task_id}`, lease = crypto.randomUUID()
+      if (!await this.state.setIfNotExists(mutex, lease, 120000)) continue
+      try {
+        const id = createHash('sha256').update(`routine:${run.id}`).digest('hex')
+        const existing = await this.state.get<DispatchRecord>(key(id))
+        if (existing) { await this.resume(existing); continue }
+        // A lost receipt for an already bound run is uncertain, never a new start.
+        if (run.status !== 'pending') continue
+        const activeId = await this.state.get<string>(`task-dispatch:active:${run.task_id}`)
+        const active = activeId ? await this.state.get<DispatchRecord>(key(activeId)) : undefined
+        if (active && !active.notified) continue
+        const task = await this.readTask(run.task_id)
+        let project: string, brief: string
+        try {
+          ;({ project, brief } = validateDispatchTask(task, this.config))
+          if (task.object.revision !== run.definition_revision) throw new Error('Routine definition changed before execution.')
+          for (const edge of task.connections ?? []) {
+            if (!edge.archived_at && edge.kind === 'depends_on' && edge.source_object_id === run.task_id
+              && (await this.readTask(edge.target_object_id)).subtype.status !== 'done') throw new Error('Routine has an unfinished dependency.')
+          }
+        } catch (error) {
+          await this.routineApi(`routine-runs/${run.id}`, 'PATCH', { status: 'blocked', result: error instanceof Error ? error.message : 'Routine is not executable.' })
+          continue
+        }
+        const targetChannel = this.config.projects[project]!.channel
+        const record: DispatchRecord = { id, routineRunId: run.id, taskId: run.task_id, revision: task.object.revision,
+          title: task.object.title, brief, project, targetChannel, originChannel: targetChannel, originTs: '', createdAt: Date.now() }
+        await this.state.appendToList(INDEX,id,{maxLength:10000,ttlMs:TTL})
+        await this.state.set(key(id),record,TTL)
+        await this.state.set(`task-dispatch:active:${run.task_id}`,id,TTL)
+        await this.resume(record)
+      } catch {
+        // Keep durable claims pending on transport failures; never issue a new run.
+      } finally { if (await this.state.get(mutex) === lease) await this.state.delete(mutex) }
+    }
   }
 
   async request(raw: string, signature?: string): Promise<DispatchRecord> {
@@ -110,6 +164,7 @@ export class TaskDispatcher {
       if (activeId) {
         const active = await this.state.get<DispatchRecord>(key(activeId))
         if (active) {
+          if (active.routineRunId && !active.notified) throw new Error('A Routine occurrence is already executing.')
           const task = await this.readTask(input.task_id)
           if (['done', 'blocked'].includes(String(task.subtype.status))) throw new Error('Task is complete or blocked; review it before requesting another execution.')
           if (!active.notified || task.subtype.status === 'doing') return await this.resume(active)
@@ -145,6 +200,15 @@ export class TaskDispatcher {
     if (!await this.state.setIfNotExists(leaseKey, lease, 120000)) return record
     try {
       record = await this.state.get<DispatchRecord>(key(record.id)) ?? record
+      if (record.routineRunId && !record.handoffAttempted) {
+        const occurrence = await this.routineApi(`routine-runs/${record.routineRunId}`, 'GET')
+        if (['review','completed','blocked','skipped'].includes(occurrence.status) || !occurrence.eligible) {
+          if (occurrence.status === 'pending') await this.routineApi(`routine-runs/${record.routineRunId}`, 'PATCH', { status:'skipped', result:'Routine paused or changed before execution.' })
+          record.notified = true
+          await this.state.set(key(record.id),record,TTL)
+          return record
+        }
+      }
       if (!record.targetTs) {
         const recovered = await this.findMessage(record.targetChannel, record.id)
         if (!recovered && record.postAttempted) throw new Error('Slack post outcome is uncertain; awaiting reconciliation without posting a duplicate.')
@@ -165,6 +229,12 @@ export class TaskDispatcher {
           const validated = validateDispatchTask(current, this.config)
           if (current.object.revision !== record.revision || validated.project !== record.project) {
             throw new Error('Task changed after dispatch preparation; review before execution.')
+          }
+          if (record.routineRunId) {
+            await this.routineApi(`routine-runs/${record.routineRunId}`, 'PATCH', {
+              status: 'running', execution_thread: `slack:${this.config.teamId}:bot-${this.config.instanceId}:${record.targetChannel}:${record.targetTs}`,
+              execution_url: record.url
+            })
           }
           record.handoffAttempted = true
           await this.state.set(key(record.id), record, TTL)
@@ -195,6 +265,7 @@ export class TaskDispatcher {
   }
 
   async recover(): Promise<void> {
+    try { await this.pollRoutines() } catch { /* Existing receipts still recover when Context polling is unavailable. */ }
     for (const id of new Set(await this.state.getList<string>(INDEX))) {
       const candidate = await this.state.get<DispatchRecord>(key(id))
       if (!candidate || candidate.notified) continue
@@ -206,6 +277,12 @@ export class TaskDispatcher {
         if (!record || record.notified) continue
         if (!record.handedOff) record = await this.resume(record)
         if (!record.handedOff || !await this.ports.finished(record)) continue
+        if (record.routineRunId) {
+          await this.routineApi(`routine-runs/${record.routineRunId}`, 'PATCH', { status: 'review', result: 'Execution returned. Review the linked result.' })
+          record.notified = true
+          await this.state.set(key(id), record, TTL)
+          continue
+        }
         const task = await this.readTask(record.taskId)
         const status = String(task.subtype.status)
         const noticeId = `${id}:notice`

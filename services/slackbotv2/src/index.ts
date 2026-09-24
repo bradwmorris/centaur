@@ -542,7 +542,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
           dispatchId: record.id, model: config.model, harnessType: 'codex', executionReasoning: config.reasoning
         })
         if (existing?.dispatchId && existing.dispatchId !== record.id) throw new Error('Execution thread already belongs to another dispatch.')
-        const text = `Delegated execution of Context Task ${record.taskId} (planned revision ${record.revision}). Read the canonical task, verify its requirements and claim it using your own execution identity before doing work. Project: ${record.project}. Report completion evidence or a blocker in the Task. Do not create a second execution thread for this dispatched task.\n\n${record.brief}`
+        const text = record.routineRunId
+          ? `Execute occurrence ${record.routineRunId} of Routine Task ${record.taskId}. Read the canonical task; do not claim, edit, or complete the parent task. Its enabled schedule authorizes this occurrence only. Execute the scoped work, then use the Context routine-result tool to report completed for an uneventful check, review for substantive results, or blocked with a reason. Project: ${record.project}. Do not start another execution thread.\n\n${record.brief}`
+          : `Delegated execution of Context Task ${record.taskId} (planned revision ${record.revision}). Read the canonical task, verify its requirements and claim it using your own execution identity before doing work. Project: ${record.project}. Report completion evidence or a blocker in the Task. Do not create a second execution thread for this dispatched task.\n\n${record.brief}`
         const message = new ChatSdkMessage({
           id: `task-dispatch:${record.id}`, threadId: thread.id, text, formatted: parseMarkdown(text),
           author: { userId: config.userId, userName: 'task-dispatch', fullName: 'Authorised task dispatch', isBot: false, isMe: false },
