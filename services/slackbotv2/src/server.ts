@@ -1,3 +1,4 @@
+import type { TaskDispatchConfig } from './task-dispatch'
 import { createSlackbotV2, type SlackbotV2Options } from './index'
 import { parseChannelDefaults } from './channel-defaults'
 import { resolveSlackHomeTeamId } from './session-api'
@@ -47,6 +48,7 @@ const consoleLogger = {
 
 const options: SlackbotV2Options = {
   apiUrl,
+  taskDispatch: taskDispatchEnv(),
   agentViewEnabled: booleanEnv('SLACKBOTV2_AGENT_VIEW_ENABLED', false),
   apiKey: optionalEnv('SLACKBOT_API_KEY'),
   assistantStatus: optionalEnv('SLACKBOTV2_ASSISTANT_STATUS'),
@@ -359,4 +361,22 @@ function log(level: (typeof LOG_LEVELS)[number], message: string, data?: unknown
       ...(data && typeof data === 'object' ? (data as Record<string, unknown>) : {})
     })
   )
+}
+
+function taskDispatchEnv(): TaskDispatchConfig | undefined {
+  const raw = optionalEnv('SLACKBOTV2_TASK_DISPATCH_CONFIG')
+  if (!raw) return undefined
+  const value = JSON.parse(raw)
+  if (!value || typeof value !== 'object' || !value.projects || !Array.isArray(value.originChannels)
+    || !Array.isArray(value.ownerIds) || !value.ownerIds.length
+    || !['userId', 'teamId', 'instanceId', 'contextUrl', 'model', 'reasoning'].every(key => typeof value[key] === 'string' && value[key])) {
+    throw new Error('Invalid task dispatch configuration')
+  }
+  for (const [project, route] of Object.entries(value.projects) as Array<[string, any]>) {
+    if (!/^[a-z]+$/.test(project) || project === 'general' || !/^C[A-Z0-9]+$/.test(route.channel)
+      || !/^[a-zA-Z0-9_-]+$/.test(route.persona)) throw new Error('Invalid task dispatch project route')
+    const defaults = parseChannelDefaults(optionalEnv('SLACKBOTV2_CHANNEL_DEFAULTS'))
+    if (defaults[route.channel]?.personaId !== route.persona) throw new Error('Dispatch route must match the channel persona')
+  }
+  return { ...value, secret: requiredEnv('SLACKBOTV2_TASK_DISPATCH_SECRET'), contextToken: requiredEnv('SLACKBOTV2_TASK_DISPATCH_CONTEXT_TOKEN') }
 }

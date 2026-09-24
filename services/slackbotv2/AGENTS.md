@@ -52,3 +52,32 @@ tests. For changes to acknowledgement, retry, or rendering, deploy locally and
 exercise a signed emulated event through the HTTP route; prove the webhook
 status, durable execution count, replayed terminal event, and final rendered
 message.
+
+## Optional project routing and dispatch
+
+`SLACKBOTV2_CHANNEL_DEFAULTS` accepts `persona` and `mentionless` per channel.
+A configured persona is pinned and must be available; unavailable or conflicting
+personas fail closed. Mentionless execution applies only to configured channels.
+
+An optional `SLACKBOTV2_TASK_DISPATCH_CONFIG` JSON object supplies `contextUrl`,
+`ownerIds`, `userId`, `teamId`, `instanceId`, `model`, `reasoning`, `originChannels`
+and `projects` (project name to `{channel, persona}`). Every destination must match
+its channel default. Provision `SLACKBOTV2_TASK_DISPATCH_SECRET` and
+`SLACKBOTV2_TASK_DISPATCH_CONTEXT_TOKEN` separately; an instance `runtimeSecretName`
+can supply them without placing credentials in values. Leave the config unset to
+disable the route and recovery worker.
+
+`POST /api/tasks/dispatch` accepts only `task_id`, `origin_thread`, and a millisecond
+`requested_at`, signed over the exact body using HMAC-SHA256 in
+`X-Centaur-Dispatch-Signature: sha256=<hex>`. The service reads the canonical Context
+Task (universal API 1.1.0), validates owner/readiness/dependencies, and selects the
+configured destination from exactly one `Project: <name>` brief line. Task creation
+alone does not dispatch. Calling integrations must require explicit user execution
+intent. Worker sessions claim their task through the normal Context lifecycle.
+
+Receipts and recovery use the existing durable Chat SDK state. Retries reconcile
+Slack metadata before posting, reuse durable execution identity, and return one
+source-thread notice after execution/render completion. An uncertain Slack write
+with no discoverable receipt stays pending for operator reconciliation instead of
+posting again. It is not evidence of task completion. No task schema, scheduler or
+legacy-history migration is included.

@@ -205,6 +205,54 @@ describe('slackbotv2', () => {
     expect(codexApi.executes.every(run => run.threadKey === threadKey(parent.ts))).toBe(true)
   })
 
+  it('dispatches a signed canonical task into a fresh project thread with execution model', async () => {
+    const taskId = '11111111-1111-4111-8111-111111111111'
+    const parent = await postUserMessage('Plan a task')
+    bot = createTestBot({
+      channelDefaults: { [CHANNEL_ID]: { personaId: 'research', mentionless: true, model: 'gpt-6-sol', reasoning: 'medium' } },
+      taskDispatch: { secret: 'test-dispatch', contextUrl: 'http://context.fixture', contextToken: 'test-token',
+        ownerIds: ['owner'], userId: USER_ID, teamId: TEAM_ID, instanceId: 'agent',
+        model: 'gpt-6-luna', reasoning: 'high', originChannels: [CHANNEL_ID],
+        projects: { research: { channel: CHANNEL_ID, persona: 'research' } } },
+      fetch: (async (input: any, init: any) => {
+        if (String(input).startsWith('http://context.fixture/')) return Response.json({ data: { objects: [{
+          object: { id: taskId, revision: 1, title: 'Synthetic research check' },
+          subtype: { status: 'todo', agent_suitable: true, owner_object_id: 'owner', due_at: '2026-09-24',
+            brief_markdown: 'Project: research\nRead the synthetic evidence and report a result.' }, connections: []
+        }] } })
+        return fetch(input, init)
+      }) as typeof fetch
+    })
+    const raw = JSON.stringify({ task_id: taskId, origin_thread: `slack:${TEAM_ID}:bot-agent:${CHANNEL_ID}:${parent.ts}`, requested_at: Date.now() })
+    const request = () => new Request('http://localhost/api/tasks/dispatch', { method: 'POST', body: raw,
+      headers: { 'X-Centaur-Dispatch-Signature': `sha256=${createHmac('sha256', 'test-dispatch').update(raw).digest('hex')}` } })
+    const response = await bot.app.request(request())
+    const receipt = await response.json() as { url?: string; dispatched?: boolean }
+    expect(response.status).toBe(200)
+    expect(receipt.dispatched).toBe(true)
+    expect(receipt.url).not.toContain(parent.ts!.replace('.', ''))
+    const duplicate = await bot.app.request(request())
+    expect(duplicate.status).toBe(200)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.creates[0]!.body.persona_id).toBe('research')
+    const line = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!)
+    expect(line.model).toBe('gpt-6-luna')
+    expect(line.reasoning).toBe('high')
+    await waitFor(() => slackApi.calls.some(call => call.method === 'chat.stopStream'))
+    const targetThread = codexApi.executes[0]!.threadKey.split(':').at(-1)!
+    const followUp = await postUserMessage('Continue the same execution', targetThread)
+    const waits: Promise<unknown>[] = []
+    await bot.app.request('/api/webhooks/slack', signedSlackEvent({ event_id: 'Ev-dispatched-followup', event: {
+      type: 'message', user: USER_ID, team: TEAM_ID, channel: CHANNEL_ID,
+      ts: followUp.ts, thread_ts: targetThread, text: 'Continue the same execution'
+    } }), {}, waitUntilContext(waits))
+    await Promise.all(waits)
+    expect(codexApi.executes).toHaveLength(2)
+    const followLine = JSON.parse(codexApi.executes[1]!.body.input_lines.at(-1)!)
+    expect(followLine.model).toBe('gpt-6-luna')
+    expect(followLine.reasoning).toBe('high')
+  })
+
   it('accepts Slack events on the legacy route', async () => {
     const parent = await postUserMessage('Legacy route context.')
     const mention = await postUserMessage(`<@${BOT_USER_ID}> use the legacy route`, parent.ts)

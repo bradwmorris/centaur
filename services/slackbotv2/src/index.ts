@@ -1,3 +1,4 @@
+import { TaskDispatcher } from './task-dispatch'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
@@ -523,6 +524,64 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   })
 
   const app = new Hono()
+  if (options.taskDispatch) {
+    const config = options.taskDispatch
+    const dispatcher = new TaskDispatcher(config, state, {
+      fetch: options.fetch as typeof fetch | undefined,
+      slack: async (method, body) => {
+        const result = await withSlackApiTimeout(options, method, () => callSlackApi(method, body, {
+          apiUrl: options.slackApiUrl, fetch: options.fetch as typeof fetch | undefined, token: options.botToken
+        }))
+        assertSlackOk(method, result)
+        return result as Record<string, any>
+      },
+      start: async record => {
+        const thread = chat.thread(slack.encodeThreadId({ channel: record.targetChannel, threadTs: record.targetTs! }))
+        const existing = await thread.state
+        if (!existing?.dispatchId) await thread.setState({
+          dispatchId: record.id, model: config.model, harnessType: 'codex', executionReasoning: config.reasoning
+        })
+        if (existing?.dispatchId && existing.dispatchId !== record.id) throw new Error('Execution thread already belongs to another dispatch.')
+        const text = `Delegated execution of Context Task ${record.taskId} (planned revision ${record.revision}). Read the canonical task, verify its requirements and claim it using your own execution identity before doing work. Project: ${record.project}. Report completion evidence or a blocker in the Task. Do not create a second execution thread for this dispatched task.\n\n${record.brief}`
+        const message = new ChatSdkMessage({
+          id: `task-dispatch:${record.id}`, threadId: thread.id, text, formatted: parseMarkdown(text),
+          author: { userId: config.userId, userName: 'task-dispatch', fullName: 'Authorised task dispatch', isBot: false, isMe: false },
+          metadata: { dateSent: new Date(record.createdAt), edited: false },
+          raw: { type: 'message', channel: record.targetChannel, team: config.teamId, user: config.userId,
+            ts: record.targetTs, thread_ts: record.targetTs, delegated_task_id: record.taskId },
+          isMention: true, attachments: [], links: []
+        })
+        await handleSlackMessageHandoff(thread, message, { assistantStatusRequested: true, mode: 'execute', options,
+          state, steeringReactions, subscribe: true, trigger: 'task_dispatch' })
+      },
+      finished: async record => {
+        const thread = chat.thread(slack.encodeThreadId({ channel: record.targetChannel, threadTs: record.targetTs! }))
+        const status = await thread.state
+        return status?.dispatchId === record.id && status.activeExecution === false && !status.renderObligation
+          && (status.executedMessageIds?.length ?? 0) > 0
+      }
+    })
+    app.post('/api/tasks/dispatch', async c => {
+      await stateConnected
+      try {
+        const receipt = await dispatcher.request(await c.req.text(), c.req.header('X-Centaur-Dispatch-Signature'))
+        return c.json({ id: receipt.id, task_id: receipt.taskId, project: receipt.project,
+          url: receipt.url, dispatched: receipt.handedOff === true }, receipt.handedOff ? 200 : 202)
+      } catch (error) {
+        return c.json({ error: errorMessage(error) }, 400)
+      }
+    })
+    // The durable receipt, not this timer, owns dispatch/recovery state.
+    let recovering = false
+    const recover = async () => {
+      if (recovering) return
+      recovering = true
+      try { await stateConnected; await dispatcher.recover() } finally { recovering = false }
+    }
+    backgroundWaitUntil(recover().catch(() => undefined))
+    const recoveryTimer = setInterval(() => { void recover().catch(() => undefined) }, 15000)
+    recoveryTimer.unref()
+  }
   app.get('/health', c => healthResponse(c, stateConnectionStatus))
   app.get('/metrics', c =>
     c.text(slackbotMetrics.expose(), 200, {
@@ -1318,7 +1377,7 @@ async function syncThreadMessageToSession(
   const resolvedReasoning = reasoningForModel(
     effectiveHarnessType,
     effectiveModel,
-    overrides.reasoning ?? channelDefault?.reasoning
+    overrides.reasoning ?? state.executionReasoning ?? channelDefault?.reasoning
   )
   const effectiveReasoning = effectiveReasoningForHarness(
     effectiveHarnessType,
