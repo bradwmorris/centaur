@@ -109,3 +109,57 @@ describe('task dispatch', () => {
     expect(f.posts[1]?.thread_ts).toBe('123.456'); expect(f.posts[1]?.text).toContain('complete')
   })
 })
+
+describe('Routine occurrence dispatch', () => {
+  async function routineFixture() {
+    const state = createMemoryState(); await state.connect()
+    const posts: any[] = [], starts: any[] = []
+    let run: any = { id: '22222222-2222-4222-8222-222222222222', task_id: taskId, definition_revision: 1, status: 'pending', eligible: true }
+    let canonical = task(), finished = false, lostPost = false
+    const ports = {
+      fetch: (async (url: any, init: any) => {
+        if (String(url).endsWith('/api/v2/read')) return Response.json({ data: { objects: [canonical] } })
+        expect(init.headers.Authorization).toBe('Bearer trusted-routine-token')
+        if (String(url).endsWith('/routines/claim')) return Response.json({data: ['pending','running'].includes(run.status) ? [run] : []})
+        if (init.method === 'GET') return Response.json({data:run})
+        const patch = JSON.parse(init.body)
+        if (patch.status === 'running' && !run.eligible) return Response.json({error:'paused'}, {status:400})
+        if (['pending','running'].includes(run.status)) run = { ...run, ...patch }
+        return Response.json({data:run})
+      }) as typeof fetch,
+      slack: async (method: string, body: any) => {
+        if (method.startsWith('conversations.')) return {messages: posts}
+        const posted={...body,ts:'123.456'}; posts.push(posted)
+        if(lostPost){lostPost=false;run.eligible=false;throw new Error('lost response')}
+        return posted
+      },
+      start: async (record: any) => {if(!starts.some(s=>s.id===record.id))starts.push(record)},
+      finished: async () => finished
+    }
+    const cfg = {...config,routineIngestUrl:'http://ingest.test',routineIngestToken:'trusted-routine-token'}
+    const dispatcher=new TaskDispatcher(cfg,state,ports)
+    return {dispatcher,posts,starts,state,ports,cfg,run:()=>run,pause:()=>{run.eligible=false},losePost:()=>{lostPost=true},finish:()=>{finished=true},result:()=>{run.status='completed'},ownerOutside:()=>{canonical=task({owner_object_id:'someone-else'})}}
+  }
+  test('uses one fresh project thread across duplicate polls and restart; preserves explicit result', async () => {
+    const f=await routineFixture()
+    await Promise.all([f.dispatcher.recover(),f.dispatcher.recover()])
+    await new TaskDispatcher(f.cfg,f.state,f.ports).recover()
+    expect(f.posts).toHaveLength(1);expect(f.starts).toHaveLength(1)
+    expect(f.starts[0].project).toBe('research');expect(f.starts[0].routineRunId).toBe(f.run().id)
+    expect(f.run().execution_thread).toBe('slack:TTEAM:bot-agent:CRESEARCH:123.456')
+    f.result();f.finish();await f.dispatcher.recover()
+    expect(f.run().status).toBe('completed');expect(f.posts).toHaveLength(1)
+  })
+  test('defaults returned execution to Review without completing parent', async () => {
+    const f=await routineFixture();await f.dispatcher.recover();f.finish();await f.dispatcher.recover()
+    expect(f.run().status).toBe('review');expect(f.starts).toHaveLength(1)
+  })
+  test('reconciles uncertain posting and honours pause before handoff', async () => {
+    const f=await routineFixture();f.losePost();await f.dispatcher.recover();f.pause();await f.dispatcher.recover()
+    expect(f.posts).toHaveLength(1);expect(f.starts).toHaveLength(0);expect(f.run().status).toBe('skipped')
+  })
+  test('rejects a Routine outside the configured ownership boundary', async () => {
+    const f=await routineFixture();f.ownerOutside();await f.dispatcher.recover()
+    expect(f.posts).toHaveLength(0);expect(f.starts).toHaveLength(0);expect(f.run().status).toBe('blocked')
+  })
+})
