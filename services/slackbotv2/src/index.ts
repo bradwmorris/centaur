@@ -64,7 +64,7 @@ import {
   reasoningForModel,
   type SlackContextBlock
 } from './console-session-link'
-import { resolveChannelDefault } from './channel-defaults'
+import { resolveChannelDefault, acceptsUnmentionedMessage, resolveProjectPersona } from './channel-defaults'
 import {
   extractMessageOverrides,
   extractPersonaOverride,
@@ -485,7 +485,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   // app_mention events. Alertmanager uses attachment.pretext, so inspect rich
   // payloads after Chat SDK has verified the webhook and before executing.
   chat.onNewMessage(/^.*$/s, async (thread, message) => {
-    if (!slackRichTextMentionsUser(message.raw, options.botUserId)) return
+    if (!slackRichTextMentionsUser(message.raw, options.botUserId) && !acceptsUnmentionedMessage(options.channelDefaults, thread.id, message)) return
     if (!(await isAllowedSlackMessage(message, options, logger))) return
     message.isMention = true
     await handleSlackMessageHandoff(thread, message, {
@@ -501,7 +501,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
 
   chat.onSubscribedMessage(async (thread, message) => {
     if (!(await isAllowedSlackMessage(message, options, logger))) return
-    if (slackRichTextMentionsUser(message.raw, options.botUserId)) message.isMention = true
+    if (slackRichTextMentionsUser(message.raw, options.botUserId) || acceptsUnmentionedMessage(options.channelDefaults, thread.id, message)) message.isMention = true
     if (message.isMention !== true) {
       traceLog(
         options,
@@ -1251,6 +1251,8 @@ async function syncThreadMessageToSession(
     setMessageText(serializedMessage, messageOverrides.cleanedText)
   }
   const overrides = messageOverrides.overrides
+  const configuredProject = resolveChannelDefault(input.options.channelDefaults, thread.id)?.personaId
+  const projectPersona = resolveProjectPersona(configuredProject, overrides.personaId, state.personaId)
   const requestedStickyOverrides = preservePinnedPersona(
     state,
     stickyThreadOverrideUpdate(overrides)
@@ -1492,8 +1494,9 @@ async function syncThreadMessageToSession(
     model: shouldStartExecution ? resolvedModel : undefined,
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
     personaId: shouldStartExecution
-      ? effectiveOverrides.personaId ?? input.options.personaId
+      ? projectPersona ?? effectiveOverrides.personaId ?? input.options.personaId
       : undefined,
+    requiredPersonaId: configuredProject,
     provider: shouldStartExecution ? resolvedProvider : undefined,
     reasoning: resolvedReasoning,
     restartOnHarnessConflict:

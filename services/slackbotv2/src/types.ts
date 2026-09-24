@@ -358,6 +358,7 @@ export type ForwardSessionInput = {
    */
   metadataModel?: string
   /** Effective persona selected by a sticky --persona=<id> flag. */
+  requiredPersonaId?: string
   personaId?: string
   /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
   provider?: string

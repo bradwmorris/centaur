@@ -713,6 +713,10 @@ slackbotv2:
   #   channelDefaults:
   #     C0ENG: { harness: claude, model: opus, reasoning: high }
   #     C0TRIAGE: { reasoning: low }
+  # Optional persona pins new sessions to a project bundle. Conflicting persona
+  # flags and unavailable bundles fail closed. mentionless accepts ordinary human
+  # messages in this channel only; other channels remain mention-gated.
+  # Example: C_PROJECT: { persona: research, mentionless: true }
   channelDefaults: {}
   # Message overrides strategy for Slack message text. "flags" keeps the legacy
   # deterministic --model/--claude/-rsn strategy. "llm" asks a small model for

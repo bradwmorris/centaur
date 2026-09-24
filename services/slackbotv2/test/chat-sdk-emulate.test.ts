@@ -184,6 +184,27 @@ describe('slackbotv2', () => {
     })
   }
 
+  it('routes unmentioned project conversations and replies through the pinned bundle once', async () => {
+    bot = createTestBot({ channelDefaults: { [CHANNEL_ID]: { personaId: 'research', mentionless: true } } })
+    const parent = await postUserMessage('Plan a research task')
+    for (const [index, posted] of [parent, await postUserMessage('Refine the plan', parent.ts)].entries()) {
+      const payload = { event_id: `Ev-project-${index}`, event: {
+        type: 'message', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID,
+        ts: posted.ts, ...(index ? { thread_ts: parent.ts } : {}), text: index ? 'Refine the plan' : 'Plan a research task'
+      } }
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request('/api/webhooks/slack', signedSlackEvent(payload), {}, waitUntilContext(waits))
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+      const duplicateWaits: Promise<unknown>[] = []
+      await bot.app.request('/api/webhooks/slack', signedSlackEvent(payload), {}, waitUntilContext(duplicateWaits))
+      await Promise.all(duplicateWaits)
+    }
+    expect(codexApi.executes).toHaveLength(2)
+    expect(codexApi.creates.every(create => create.body.persona_id === 'research')).toBe(true)
+    expect(codexApi.executes.every(run => run.threadKey === threadKey(parent.ts))).toBe(true)
+  })
+
   it('accepts Slack events on the legacy route', async () => {
     const parent = await postUserMessage('Legacy route context.')
     const mention = await postUserMessage(`<@${BOT_USER_ID}> use the legacy route`, parent.ts)
