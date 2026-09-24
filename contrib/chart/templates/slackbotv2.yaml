@@ -228,6 +228,10 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ include "centaur.secretEnvName" $root }}
+{{- with $slackbot.runtimeSecretName }}
+            - secretRef:
+                name: {{ . | quote }}
+{{- end }}
           ports:
             - containerPort: 3001
               name: http

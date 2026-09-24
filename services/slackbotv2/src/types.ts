@@ -1,3 +1,4 @@
+import type { TaskDispatchConfig } from './task-dispatch'
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import type { CodexAppServerToChatStreamOptions } from '@centaur/rendering'
 import type { Attachment, Chat, Logger, StateAdapter } from 'chat'
@@ -138,6 +139,7 @@ export type SlackbotV2BlockActionPayload = {
 }
 
 export type SlackbotV2Options = {
+  taskDispatch?: TaskDispatchConfig
   allowedExternalTeamIds?: readonly string[]
   apiKey?: string
   apiUrl: string
@@ -286,6 +288,8 @@ export type SlackbotV2 = {
 }
 
 export type SlackbotV2ThreadState = {
+  executionReasoning?: string
+  dispatchId?: string
   activeExecution?: boolean
   /** Canonical Centaur Context Chat returned by the authenticated interaction sink. */
   contextChatObjectId?: string
@@ -358,6 +362,7 @@ export type ForwardSessionInput = {
    */
   metadataModel?: string
   /** Effective persona selected by a sticky --persona=<id> flag. */
+  requiredPersonaId?: string
   personaId?: string
   /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
   provider?: string

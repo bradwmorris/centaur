@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
   channelIdFromThreadId,
+  acceptsUnmentionedMessage,
+  resolveProjectPersona,
   parseChannelDefaults,
   resolveChannelDefault
 } from '../src/channel-defaults'
@@ -119,5 +121,29 @@ describe('resolveChannelDefault', () => {
     expect(resolveChannelDefault(defaults, 'slack:C0OTHER:ts')).toBeUndefined()
     expect(resolveChannelDefault(undefined, 'slack:C0ENG:ts')).toBeUndefined()
     expect(resolveChannelDefault(defaults, 'web:t1')).toBeUndefined()
+  })
+})
+
+
+describe('project channels', () => {
+  const defaults = parseChannelDefaults(JSON.stringify({ CPROJECT: { persona: 'research', mentionless: true } }))
+  test('accepts a persona-only channel and only human ordinary messages', () => {
+    expect(defaults.CPROJECT?.personaId).toBe('research')
+    expect(acceptsUnmentionedMessage(defaults, 'slack:CPROJECT:1', { author: {}, raw: {} })).toBe(true)
+    expect(acceptsUnmentionedMessage(defaults, 'slack:COTHER:1', { author: {}, raw: {} })).toBe(false)
+    expect(acceptsUnmentionedMessage(defaults, 'slack:CPROJECT:1', { author: { isBot: true }, raw: {} })).toBe(false)
+    expect(acceptsUnmentionedMessage(defaults, 'slack:CPROJECT:1', { author: {}, raw: { bot_id: 'B1' } })).toBe(false)
+    expect(acceptsUnmentionedMessage(defaults, 'slack:CPROJECT:1', { author: {}, raw: { subtype: 'message_changed' } })).toBe(false)
+  })
+  test('fails invalid project configuration instead of silently dropping the route', () => {
+    expect(() => parseChannelDefaults('{"C1":{"persona":"../dev"}}')).toThrow('invalid persona')
+    expect(() => parseChannelDefaults('{"C1":{"mentionless":"false"}}')).toThrow('boolean')
+  })
+  test('pins configured project and rejects conflicting requests or old threads', () => {
+    expect(resolveProjectPersona('research', undefined, undefined)).toBe('research')
+    expect(resolveProjectPersona('research', undefined, 'research')).toBe('research')
+    expect(resolveProjectPersona(undefined, 'dev', undefined)).toBeUndefined()
+    expect(() => resolveProjectPersona('research', 'dev', undefined)).toThrow('fixed project')
+    expect(() => resolveProjectPersona('research', undefined, null)).toThrow('older project')
   })
 })

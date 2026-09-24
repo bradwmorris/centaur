@@ -490,6 +490,9 @@ export async function forwardToSessionApi(
     sessionApiTimeoutMs(options),
     'create session'
   )
+  if (input.requiredPersonaId && created.personaId !== input.requiredPersonaId) {
+    throw new Error(`Configured project persona "${input.requiredPersonaId}" is unavailable for this session; execution was not started.`)
+  }
   if (created.harnessType) input.metadataHarnessType = created.harnessType
   input.harnessAssignment = created.harnessAssignment
   traceLog(options, 'slackbotv2_session_create_complete', input.trace, {

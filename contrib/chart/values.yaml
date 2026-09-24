@@ -621,6 +621,9 @@ apiRs:
 # Chat SDK Slackbot v2. Forwards Slack events to the api-rs control plane
 # (:8080) and streams responses back. Listens on :3001.
 slackbotv2:
+  # Optional instance-scoped runtime configuration and task-dispatch credentials.
+  # Secret data is provisioned out of band; no secret values belong in Helm values.
+  runtimeSecretName: ""
   enabled: true
   # Leave empty for the legacy singleton deployment. When non-empty, render one
   # isolated Deployment and Service per Slack app. Each instance inherits this
@@ -713,6 +716,10 @@ slackbotv2:
   #   channelDefaults:
   #     C0ENG: { harness: claude, model: opus, reasoning: high }
   #     C0TRIAGE: { reasoning: low }
+  # Optional persona pins new sessions to a project bundle. Conflicting persona
+  # flags and unavailable bundles fail closed. mentionless accepts ordinary human
+  # messages in this channel only; other channels remain mention-gated.
+  # Example: C_PROJECT: { persona: research, mentionless: true }
   channelDefaults: {}
   # Message overrides strategy for Slack message text. "flags" keeps the legacy
   # deterministic --model/--claude/-rsn strategy. "llm" asks a small model for
