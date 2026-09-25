@@ -167,6 +167,14 @@ def _copy_published_tools(tool_dir: Path, published: Path) -> None:
     blocklist = _tool_blocklist()
     existing = {package_dir.name: package_dir for package_dir in _tool_package_dirs(tool_dir)}
     for package_dir in _tool_package_dirs(published):
+        # Persona metadata is consumed by api-rs, not installed as a tool.
+        # Its name may equal a tool category (for example "research").
+        try:
+            metadata = tomllib.loads((package_dir / "pyproject.toml").read_text())
+        except (OSError, tomllib.TOMLDecodeError):
+            metadata = {}
+        if ((metadata.get("tool") or {}).get("centaur") or {}).get("type") == "persona":
+            continue
         tool_name = package_dir.name
         if allowlist is not None and tool_name not in allowlist:
             # Not in TOOL_ALLOWLIST -> don't install; keeps the agent's catalog
@@ -183,7 +191,9 @@ def _copy_published_tools(tool_dir: Path, published: Path) -> None:
         relative_package_dir = package_dir.relative_to(published)
         target = tool_dir / relative_package_dir
         if target.exists() or target.is_symlink():
-            _remove_path(target)
+            raise RuntimeError(
+                f"tool path collision: {package_dir} would replace {target}"
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(package_dir, target, symlinks=True)
         existing[tool_name] = target
