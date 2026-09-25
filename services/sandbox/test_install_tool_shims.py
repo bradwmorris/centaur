@@ -50,6 +50,55 @@ class CopyPublishedToolsTest(unittest.TestCase):
             self.assertFalse((target / "research" / "websearch" / "new.py").exists())
             self.assertEqual((target / "research" / "company" / "pyproject.toml").read_text(), "company\n")
 
+    def test_persona_category_collision_preserves_tools_in_either_source_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "base"
+            personas = root / "personas"
+            for name in ("youtube", "websearch"):
+                package = base / "research" / name
+                package.mkdir(parents=True)
+                (package / "pyproject.toml").write_text(
+                    f'[project]\nname = "{name}"\n[project.scripts]\n{name} = "client:main"\n'
+                )
+            persona = personas / "research"
+            persona.mkdir(parents=True)
+            (persona / "pyproject.toml").write_text(
+                '[project]\nname = "research-persona"\n'
+                '[tool.centaur]\ntype = "persona"\nprompt_file = "PROMPT.md"\n'
+            )
+            (persona / "PROMPT.md").write_text("Research prompt")
+            for index, sources in enumerate(((base, personas), (personas, base))):
+                with self.subTest(order=index), mock.patch.dict(
+                    os.environ, {"TOOL_ALLOWLIST": "", "TOOL_BLOCKLIST": ""}
+                ):
+                    target = root / f"target-{index}"
+                    for source in sources:
+                        install_tool_shims._copy_published_tools(target, source)
+                    self.assertEqual(
+                        set(install_tool_shims._discover_scripts([target])),
+                        {"youtube", "websearch"},
+                    )
+                    self.assertFalse((target / "research" / "pyproject.toml").exists())
+                    self.assertEqual(
+                        {p.name for p in install_tool_shims._tool_package_dirs(target)},
+                        {"youtube", "websearch"},
+                    )
+
+    def test_package_cannot_replace_existing_category(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            nested = target / "research" / "youtube"
+            nested.mkdir(parents=True)
+            (nested / "pyproject.toml").write_text('[project]\nname = "youtube"\n')
+            package = root / "overlay" / "research"
+            package.mkdir(parents=True)
+            (package / "pyproject.toml").write_text('[project]\nname = "research"\n')
+            with self.assertRaisesRegex(RuntimeError, "tool path collision"):
+                install_tool_shims._copy_published_tools(target, package.parent)
+            self.assertTrue((nested / "pyproject.toml").is_file())
+
     def test_tool_allowlist_restricts_installed_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
