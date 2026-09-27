@@ -1,0 +1,147 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "create_objects",
+    "create_connections"
+  ],
+  "properties": {
+    "create_objects": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/create_object"
+      }
+    },
+    "create_connections": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/create_connection"
+      }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string"
+    },
+    "message_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/uuid"
+      }
+    },
+    "memory_fields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary_event",
+        "happened_at"
+      ],
+      "properties": {
+        "primary_event": {
+          "type": "boolean"
+        },
+        "happened_at": {
+          "type": "string"
+        }
+      }
+    },
+    "object_ref": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "object_id"
+          ],
+          "properties": {
+            "object_id": {
+              "$ref": "#/$defs/uuid"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "client_id"
+          ],
+          "properties": {
+            "client_id": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "create_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "client_id",
+        "kind",
+        "title",
+        "description",
+        "supporting_message_ids",
+        "memory"
+      ],
+      "properties": {
+        "client_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "memory"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "supporting_message_ids": {
+          "$ref": "#/$defs/message_ids"
+        },
+        "memory": {
+          "$ref": "#/$defs/memory_fields"
+        }
+      }
+    },
+    "create_connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "kind",
+        "target",
+        "description",
+        "supporting_message_ids"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/object_ref"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "involves",
+            "about",
+            "themed",
+            "related_to",
+            "derived_from"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/object_ref"
+        },
+        "description": {
+          "type": "string"
+        },
+        "supporting_message_ids": {
+          "$ref": "#/$defs/message_ids"
+        }
+      }
+    }
+  }
+}

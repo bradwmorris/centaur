@@ -1,0 +1,156 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "changes"
+  ],
+  "properties": {
+    "changes": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "anyOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "reason",
+              "object_id",
+              "title",
+              "description"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "rewrite"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "object_id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "reason",
+              "object_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "retire"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "object_id": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "reason",
+              "object_id",
+              "survivor_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "merge"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "object_id": {
+                "type": "string"
+              },
+              "survivor_id": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "reason",
+              "connection_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "disconnect"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "connection_id": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "reason",
+              "object_id",
+              "target_id",
+              "kind",
+              "description"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "connect"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "object_id": {
+                "type": "string"
+              },
+              "target_id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

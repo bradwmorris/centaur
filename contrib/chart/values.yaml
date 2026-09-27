@@ -485,9 +485,12 @@ apiRs:
   # Private, authenticated Context Curator inference through Codex and the
   # Console-managed ChatGPT subscription identity. Requires
   # sandbox.codexAuthMode=access_token and CENTAUR_CONTEXT_API_KEY in the
-  # infra Secret. Direct API mode remains a Context-side rollback only.
+  # infra Secret, including OPENAI_CODEX_ACCOUNT_ID for sandbox account routing.
+  # Direct API mode remains a Context-side rollback only.
   curatorInference:
     enabled: true
+    # Shared turn budget (1..600 seconds), including High maintenance reasoning.
+    # Set the Context HTTP timeout above this plus sandbox start/stop overhead.
     timeoutSecs: 180
   # Workflow enablement policy. Production defaults to all workflows enabled.
   # Set workflowEnableMode: allowlist in staging and list allowed workflow names
