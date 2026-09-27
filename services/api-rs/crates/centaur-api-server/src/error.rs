@@ -26,6 +26,8 @@ pub enum ApiError {
     PayloadTooLarge(String),
     #[error("{0}")]
     ServiceUnavailable(String),
+    #[error("curator inference failed: {0:?}")]
+    CuratorFailure(Box<crate::curator_inference::CuratorFailure>),
     /// Server-side misconfiguration or invariant failure. The message is
     /// logged but never returned to the client.
     #[error("{0}")]
@@ -56,6 +58,13 @@ impl IntoResponse for ApiError {
             Self::MethodNotAllowed(_) => StatusCode::METHOD_NOT_ALLOWED,
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::CuratorFailure(failure) => {
+                if failure.classification == "invalid_request" {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            }
             Self::Runtime(SessionRuntimeError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             Self::Runtime(SessionRuntimeError::ShuttingDown) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Runtime(SessionRuntimeError::Store(SessionStoreError::NotFound { .. })) => {
@@ -118,6 +127,10 @@ impl IntoResponse for ApiError {
             body["code"] = json!("principal_conflict");
             body["existing_principal"] = json!(existing);
             body["requested_principal"] = json!(requested);
+        }
+        if let Self::CuratorFailure(diagnostics) = &self {
+            body["code"] = json!("curator_inference_failed");
+            body["diagnostics"] = json!(diagnostics);
         }
         let mut response = (status, Json(body)).into_response();
         if status == StatusCode::UNAUTHORIZED {

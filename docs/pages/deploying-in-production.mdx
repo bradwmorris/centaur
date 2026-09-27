@@ -195,10 +195,53 @@ backend.
 To run Centaur Context's Curator on the same subscription, set
 `apiRs.curatorInference.enabled=true`, keep `sandbox.codexAuthMode=access_token`,
 and configure Context with the private api-rs endpoint, the matching
-`CENTAUR_CONTEXT_API_KEY`, and exact model `gpt-5.6-luna`. Each request runs in
+`CENTAUR_CONTEXT_API_KEY`, and exact model `gpt-6-luna`. Supply
+`OPENAI_CODEX_ACCOUNT_ID` through the existing infra Secret; both ordinary and
+dedicated Curator sandboxes receive this routing identifier. The sandbox generates
+an unsigned, non-credential placeholder with the matching account identity;
+real token substitution remains exclusively in the proxy. Use a sandbox with
+Codex CLI 0.156.1 or newer and the account-aware placeholder startup helper.
+Each request runs in
 an ephemeral repo-less sandbox with read-only Codex execution and a structured
 output schema; api-rs rejects observed command or MCP tool activity and does
-not create a durable Centaur session. Set Context's transport to `direct_api`
+not create a durable Centaur session. Exact versioned extraction, Chat-summary,
+and maintenance schemas live in `curator_contracts/` beside the broker source;
+maintenance v1 remains accepted for rollout compatibility, while v2 requires the
+surviving Memory's title and description on merges. No arbitrary schema is allowed.
+Successful output must match the same contract. Context retains all write authority.
+
+`apiRs.curatorInference.timeoutSecs` / `CURATOR_INFERENCE_TIMEOUT_SECS` supplies
+the turn budget for every contract (default 180, range 1–600 seconds). Maintenance
+no longer has a separate 60-second cap. Measure High reasoning with synthetic
+requests before enabling the worker; configure the caller timeout above the turn
+budget plus sandbox startup, queueing and cleanup. Keep extraction and summaries
+at their existing effort; the reviewer sends `high` explicitly.
+
+Failures return `code: curator_inference_failed` and a bounded `diagnostics`
+object with request/execution identity, requested model and effort, classification,
+optional numeric provider status and allowlisted provider code, retryability, and
+duration. No provider message, input, token, or raw stderr is returned or logged.
+Unknown causes are `model_failure`, not an inferred authentication diagnosis.
+Consumers must validate the receipt identity and persist only these safe fields;
+retry transient transport/rate-limit/timeouts within their bounded attempt policy,
+and pause permanent model/authentication/quota failures for operator action.
+The broker does not retry whole model turns. It coalesces concurrent calls with the same request ID and
+replays successful matching requests from a bounded process-local cache. Restart,
+cache eviction, cancellation or a lost response can still cause repeated billed
+inference; this is not provider exactly-once execution. Context owns durable
+leases, idempotent commits and recovery. After attachment, the broker drops all
+I/O readers on every outcome and attempts bounded sandbox cleanup, including
+cancellation. A pre-existing limitation in the shared `create_running_io` helper
+remains: if attachment fails after creation but before an ID is returned, the
+broker cannot identify that sandbox for immediate cleanup; operators must rely
+on the existing sandbox reaper for that case.
+
+Release the API, account-aware sandbox, and compatible Context consumer together.
+First keep maintenance in preview, exercise all three synthetic consumer contracts,
+check model/effort and receipt attribution, and inspect safe failure receipts. Pin
+the tested image digests. Roll back the API and its paired consumer configuration
+together; a 5.6 consumer must not point at the fixed 6 broker.
+Set Context's transport to `direct_api`
 to roll back without changing the agent authentication mode.
 
 For a complete API-key rollback, change both chart values together:

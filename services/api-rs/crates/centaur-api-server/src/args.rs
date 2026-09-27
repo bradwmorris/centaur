@@ -942,6 +942,12 @@ impl SandboxArgs {
                 "CURATOR_INFERENCE_ENABLED requires CODEX_AUTH_MODE=access_token".to_owned(),
             ));
         }
+        let account_id = clean_optional_value(env::var("OPENAI_CODEX_ACCOUNT_ID").ok().as_deref())
+            .ok_or_else(|| {
+                ServerError::UnsupportedConfig(
+                    "CURATOR_INFERENCE_ENABLED requires OPENAI_CODEX_ACCOUNT_ID".to_owned(),
+                )
+            })?;
         let backend = AgentSandboxBackend::new(
             self.kube_client().await?,
             AgentSandboxConfig::try_from(self)?,
@@ -955,6 +961,7 @@ impl SandboxArgs {
         .label("centaur.ai/harness", "codex")
         .args(["harness-server", "codex"])
         .env("CODEX_AUTH_MODE", "access_token")
+        .env("OPENAI_CODEX_ACCOUNT_ID", account_id)
         .env("CODEX_THREAD_SANDBOX", "read-only")
         .env("CENTAUR_HARNESS_REDACT_INPUT_EVENTS", "true")
         .env("CENTAUR_TOOLS_AUTO_RELOAD", "false")
@@ -1216,6 +1223,12 @@ impl SandboxArgs {
         let codex_auth_mode = clean_optional_value(env::var("CODEX_AUTH_MODE").ok().as_deref())
             .unwrap_or_else(|| "api_key".to_owned());
         envs.push(("CODEX_AUTH_MODE".to_owned(), codex_auth_mode.clone()));
+        if codex_auth_mode == "access_token"
+            && let Some(account_id) =
+                clean_optional_value(env::var("OPENAI_CODEX_ACCOUNT_ID").ok().as_deref())
+        {
+            envs.push(("OPENAI_CODEX_ACCOUNT_ID".to_owned(), account_id));
+        }
         if codex_auth_mode == "api_key"
             && let Some(base_url) =
                 clean_optional_value(env::var("OPENAI_BASE_URL").ok().as_deref())
@@ -3557,6 +3570,27 @@ mod tests {
         assert_eq!(
             args.sandbox.iron_proxy.harness.engine,
             HarnessType::ClaudeCode
+        );
+    }
+
+    #[test]
+    fn subscription_template_forwards_only_account_route() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("CODEX_AUTH_MODE", "access_token"),
+            ("OPENAI_CODEX_ACCOUNT_ID", "synthetic-account"),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+        let env = args.sandbox.codex_app_server_env_template().unwrap();
+        assert!(
+            env.iter()
+                .any(|(name, value)| name == "OPENAI_CODEX_ACCOUNT_ID"
+                    && value == "synthetic-account")
         );
     }
 
