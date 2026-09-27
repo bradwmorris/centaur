@@ -17,6 +17,7 @@ pub const CURATOR_MODEL: &str = "gpt-6-luna";
 const MAX_INPUT_BYTES: usize = 256 * 1024;
 const MAX_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_MAINTENANCE_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_IDEMPOTENCY_ENTRIES: usize = 256;
 
 #[derive(Clone)]
@@ -580,7 +581,7 @@ async fn run_inference(
             .map_err(|error| ApiError::Internal(format!("flush curator sandbox input: {error}")))?;
 
         let output_limit = if is_maintenance(&request.output_schema) {
-            8_000
+            MAX_MAINTENANCE_OUTPUT_BYTES
         } else {
             MAX_OUTPUT_BYTES
         };
@@ -891,6 +892,85 @@ mod tests {
             assert_eq!(result.output, output);
             assert_eq!(result.reasoning_effort, effort);
             assert_eq!(result.model, CURATOR_MODEL);
+        }
+    }
+
+    fn maintenance_plan_with_size(bytes: usize) -> Value {
+        let changes: Vec<Value> = (0..20)
+            .map(|index| {
+                json!({
+                    "action": "rewrite",
+                    "object_id": format!("synthetic-memory-{index}"),
+                    "title": "Synthetic event",
+                    "description": "The team agreed to a synthetic delivery date.",
+                    "reason": "The cited evidence supports this wording."
+                })
+            })
+            .collect();
+        let mut plan = json!({"changes": changes});
+        let padding = bytes - plan.to_string().len();
+        plan["changes"][0]["reason"] = json!(format!(
+            "The cited evidence supports this wording.{}",
+            "r".repeat(padding)
+        ));
+        assert_eq!(plan.to_string().len(), bytes);
+        plan
+    }
+
+    async fn maintenance_plan_result(
+        plan: &Value,
+        schema: Value,
+    ) -> Result<CuratorInferenceResponse, ApiError> {
+        events_result(vec![
+            json!({"method":"item/completed","params":{"item":{"type":"agentMessage","text":plan.to_string()}}}),
+            json!({"method":"turn/completed","params":{"turn":{"status":"completed"}}}),
+        ], "high", schema).await
+    }
+
+    #[tokio::test]
+    async fn maintenance_accepts_plans_above_legacy_limit_through_64_kib() {
+        for bytes in [12_000, MAX_MAINTENANCE_OUTPUT_BYTES] {
+            let plan = maintenance_plan_with_size(bytes);
+            for schema in [
+                memory_maintenance_schema(),
+                legacy_memory_maintenance_schema(),
+            ] {
+                assert!(matches_contract(&plan, &schema, &schema));
+                let response = maintenance_plan_result(&plan, schema).await.unwrap();
+                assert_eq!(response.output, plan);
+                assert_eq!(response.reasoning_effort, "high");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn maintenance_rejects_plans_over_64_kib_and_preserves_action_limit() {
+        let oversized = maintenance_plan_with_size(MAX_MAINTENANCE_OUTPUT_BYTES + 1);
+        for schema in [
+            memory_maintenance_schema(),
+            legacy_memory_maintenance_schema(),
+        ] {
+            assert!(matches_contract(&oversized, &schema, &schema));
+            let ApiError::CuratorFailure(failure) =
+                maintenance_plan_result(&oversized, schema.clone())
+                    .await
+                    .unwrap_err()
+            else {
+                panic!("missing safe diagnostics");
+            };
+            assert_eq!(failure.classification, "output_limit");
+            assert!(!failure.retryable);
+
+            let mut too_many = maintenance_plan_with_size(12_000);
+            let extra = too_many["changes"][0].clone();
+            too_many["changes"].as_array_mut().unwrap().push(extra);
+            let ApiError::CuratorFailure(failure) = maintenance_plan_result(&too_many, schema)
+                .await
+                .unwrap_err()
+            else {
+                panic!("missing safe diagnostics");
+            };
+            assert_eq!(failure.classification, "malformed_output");
         }
     }
 
