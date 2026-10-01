@@ -47,6 +47,9 @@ pub const WORKFLOW_ETL_BACKFILL_QUEUE: &str = "centaur_workflows_etl_backfill";
 pub const WORKFLOW_SCHEDULE_QUEUE: &str = "centaur_workflow_schedules";
 pub const WORKFLOW_TASK: &str = "centaur.workflow";
 pub const WORKFLOW_SCHEDULE_TASK: &str = "centaur.workflow.schedule_tick";
+// An indefinite event wait uses PostgreSQL infinity, which cannot be decoded as
+// OffsetDateTime or serialized to RFC3339. Keep status readable while suspended.
+const WORKFLOW_UPDATED_AT_SQL: &str = "greatest(t.enqueue_at, case when isfinite(r.available_at) then r.available_at else t.enqueue_at end)";
 const PYTHON_HOST_ENV: &str = "PYTHON_WORKFLOW_HOST_PATH";
 const PYTHON_HOST_INTERPRETER_ENV: &str = "PYTHON_WORKFLOW_HOST_PYTHON";
 const WORKFLOW_TOOL_API_URL_ENV: &str = "WORKFLOW_TOOL_API_URL";
@@ -957,7 +960,7 @@ impl WorkflowRuntime {
                 t.completed_payload,
                 r.failure_reason,
                 t.enqueue_at as created_at,
-                greatest(t.enqueue_at, coalesce(r.available_at, t.enqueue_at)) as updated_at
+                {WORKFLOW_UPDATED_AT_SQL} as updated_at
             from {task_table} t
             join {run_table} r on r.run_id = t.last_attempt_run
             where (
@@ -1008,7 +1011,7 @@ impl WorkflowRuntime {
                 t.completed_payload,
                 r.failure_reason,
                 t.enqueue_at as created_at,
-                greatest(t.enqueue_at, coalesce(r.available_at, t.enqueue_at)) as updated_at
+                {WORKFLOW_UPDATED_AT_SQL} as updated_at
             from {run_table} r
             join {task_table} t on t.task_id = r.task_id
             where r.run_id = $1::uuid
@@ -4682,6 +4685,36 @@ pub enum WorkflowRuntimeError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[tokio::test]
+    async fn suspended_run_timestamps_remain_readable() {
+        let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
+            eprintln!("SKIP: disposable database not configured");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        for wake in ["infinity", "-infinity", "2026-10-02T01:00:00Z"] {
+            let row = sqlx::query(&format!(
+                "select 'run'::text as run_id, 'task'::text as task_id,
+                 '{{}}'::jsonb as params, 'suspended'::text as state,
+                 1::int as attempts, null::jsonb as completed_payload,
+                 null::jsonb as failure_reason, t.enqueue_at as created_at,
+                 {WORKFLOW_UPDATED_AT_SQL} as updated_at
+                 from (select '2026-10-01T00:00:00Z'::timestamptz as enqueue_at) t
+                 cross join (select $1::text::timestamptz as available_at) r"
+            ))
+            .bind(wake)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let run = workflow_run_from_row(row).unwrap();
+            assert!(run.updated_at >= run.created_at);
+            if wake.contains("infinity") {
+                assert_eq!(run.updated_at, run.created_at);
+            }
+            serde_json::to_value(run).unwrap();
+        }
+    }
 
     async fn assert_structured_host_error_is_bounded(message_type: &str) {
         let stderr_task = tokio::spawn(async {
