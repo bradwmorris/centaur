@@ -28,10 +28,11 @@ pub(crate) enum Capability {
     AdminArchive,
     AdminSync,
     CuratorInference,
+    ExternalWorkflows,
 }
 
 impl Capability {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::SessionsRead,
         Self::SessionsWrite,
         Self::SandboxesDrain,
@@ -42,6 +43,7 @@ impl Capability {
         Self::AdminArchive,
         Self::AdminSync,
         Self::CuratorInference,
+        Self::ExternalWorkflows,
     ];
 }
 
@@ -159,6 +161,28 @@ impl ApiAuthConfig {
             ));
         }
 
+        if let Some(raw) = optional_env("CENTAUR_EXTERNAL_WORKFLOW_CALLERS") {
+            let entries: std::collections::BTreeMap<String, String> = serde_json::from_str(&raw)
+                .map_err(|_| ApiAuthConfigError::InvalidExternalCallers)?;
+            for (name, token) in entries {
+                if name.is_empty()
+                    || name.len() > 64
+                    || !name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                    || token.len() < 32
+                {
+                    return Err(ApiAuthConfigError::InvalidExternalCallers);
+                }
+                callers.push(static_caller(
+                    &format!("external:{name}"),
+                    CallerClass::Ingress,
+                    token,
+                    [Capability::ExternalWorkflows],
+                    None,
+                ));
+            }
+        }
         validate_unique_tokens(&callers)?;
         Ok(Self {
             static_callers: Arc::new(callers),
@@ -200,6 +224,19 @@ impl ApiAuthConfig {
             jwt_audience: Arc::from(DEFAULT_API_JWT_AUDIENCE),
             jwt_issuer: Arc::from(DEFAULT_API_JWT_ISSUER),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn testing_with_external(token: impl Into<String>) -> Self {
+        let mut auth = Self::testing("test-secret");
+        auth.static_callers = Arc::new(vec![static_caller(
+            "external:test",
+            CallerClass::Ingress,
+            token.into(),
+            [Capability::ExternalWorkflows],
+            None,
+        )]);
+        auth
     }
 
     #[cfg(test)]
@@ -305,6 +342,10 @@ impl ApiAuthConfig {
 
 #[derive(Debug, Error)]
 pub enum ApiAuthConfigError {
+    #[error(
+        "CENTAUR_EXTERNAL_WORKFLOW_CALLERS must map bounded caller names to distinct tokens of at least 32 characters"
+    )]
+    InvalidExternalCallers,
     #[error("{0} is required for api-rs authentication")]
     MissingEnvironment(&'static str),
     #[error("api-rs authentication keys for {first} and {second} must be distinct")]

@@ -492,6 +492,9 @@ apiRs:
   # Workflow enablement policy. Production defaults to all workflows enabled.
   # Set workflowEnableMode: allowlist in staging and list allowed workflow names
   # in workflowAllowedNames as a comma/whitespace-separated string.
+  # External host access is opt-in through CENTAUR_EXTERNAL_WORKFLOW_CALLERS in
+  # the existing API Secret; never put token values in values or host passthrough.
+  # See tools/external_workflows/README.md for installation and migration 0055.
   workflowHostSandbox: true
   workflowEnableMode: all
   workflowAllowedNames: ""
@@ -955,3 +958,6 @@ containerSecurityContext:
   capabilities:
     drop:
       - ALL
+
+# Optional server-only CENTAUR_EXTERNAL_WORKFLOW_APPROVERS grants trusted desktop
+# approval transport separately; see tools/external_workflows/README.md.

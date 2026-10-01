@@ -1,0 +1,6 @@
+# Update only the workflow host on an operator-verified existing sandbox image.
+# Preserve its tools, entrypoint, user, browser and runtime trust configuration.
+ARG WORKFLOW_HOST_BASE
+FROM ${WORKFLOW_HOST_BASE}
+COPY --chmod=755 services/workflow-python/workflow_host.py /usr/local/bin/workflow-host
+COPY services/workflow-python/api/ /usr/local/bin/api/

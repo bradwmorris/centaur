@@ -101,6 +101,60 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn external_workflow_token_cannot_reach_admin_or_general_run_routes() {
+        let app = build_router_with_app_state(AppState::unready(
+            crate::auth::ApiAuthConfig::testing_with_external("external-test-key"),
+        ));
+        for (method, path) in [
+            ("GET", "/api/workflows/runs"),
+            ("POST", "/api/workflows/runs"),
+            (
+                "GET",
+                "/api/workflows/runs/00000000-0000-0000-0000-000000000001",
+            ),
+            ("POST", "/api/workflows/events"),
+            ("POST", "/api/workflows/actions/invoke"),
+            ("GET", "/api/session/codex:test"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("authorization", "Bearer external-test-key")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/external/workflows")
+                    .header("authorization", "Bearer external-test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let anonymous = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/external/workflows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    }
+
     #[derive(Clone, Copy)]
     struct TestSessionPrincipalRegistrar;
 

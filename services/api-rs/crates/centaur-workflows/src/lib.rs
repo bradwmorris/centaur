@@ -36,6 +36,7 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+pub mod external;
 pub mod slack_button_feedback;
 pub mod slack_buttons;
 
@@ -109,6 +110,8 @@ pub struct WorkflowRuntime {
 }
 
 struct WorkflowRuntimeInner {
+    pool: sqlx::PgPool,
+    external_catalog: Arc<RwLock<BTreeMap<String, external::WorkflowDescriptor>>>,
     client: Client,
     slack_live_client: Client,
     etl_client: Client,
@@ -185,6 +188,9 @@ impl WorkflowEnablement {
         if self.mode == WorkflowEnableMode::All {
             return;
         }
+        metadata
+            .external_catalog
+            .retain(|name, _| self.is_enabled(name));
         metadata
             .workflow_names
             .retain(|workflow_name| self.is_enabled(workflow_name));
@@ -473,6 +479,10 @@ pub enum WorkflowWebhookTriggerKey {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct WorkflowTaskInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_origin: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_owner: Option<Value>,
     workflow_name: String,
     input: Value,
     harness_type: HarnessType,
@@ -631,6 +641,8 @@ impl WorkflowRuntime {
             &discovery,
             &enablement,
         )?));
+
+        let external_catalog = Arc::new(RwLock::new(discovery.external_catalog.clone()));
 
         let task_session_runtime = session_runtime.clone();
         let task_workflow_host_sandbox = workflow_host_sandbox.clone();
@@ -808,6 +820,7 @@ impl WorkflowRuntime {
 
         if let Some(interval) = workflow_reconcile_interval() {
             spawn_workflow_metadata_reconciler(
+                external_catalog.clone(),
                 schedule_client.clone(),
                 workflow_clients,
                 webhook_registry.clone(),
@@ -820,6 +833,8 @@ impl WorkflowRuntime {
 
         Ok(Self {
             inner: Arc::new(WorkflowRuntimeInner {
+                pool: store.pool().clone(),
+                external_catalog,
                 client,
                 slack_live_client,
                 etl_client,
@@ -847,6 +862,15 @@ impl WorkflowRuntime {
         request: CreateWorkflowRunRequest,
         feedback: Option<slack_button_feedback::ButtonFeedback>,
     ) -> Result<CreateWorkflowRunResponse, WorkflowRuntimeError> {
+        self.create_run_with_origin(request, feedback, None).await
+    }
+
+    async fn create_run_with_origin(
+        &self,
+        request: CreateWorkflowRunRequest,
+        feedback: Option<slack_button_feedback::ButtonFeedback>,
+        external_origin: Option<Value>,
+    ) -> Result<CreateWorkflowRunResponse, WorkflowRuntimeError> {
         let workflow_name = request.workflow_name.trim();
         if workflow_name.is_empty() {
             return Err(WorkflowRuntimeError::BadRequest(
@@ -859,6 +883,8 @@ impl WorkflowRuntime {
             .spawn(
                 WORKFLOW_TASK,
                 WorkflowTaskInput {
+                    external_owner: external_origin.clone(),
+                    external_origin,
                     workflow_name: workflow_name.to_owned(),
                     input: request.input,
                     harness_type: request.harness_type.unwrap_or(HarnessType::Codex),
@@ -1014,6 +1040,8 @@ impl WorkflowRuntime {
         event_name: &str,
         payload: Value,
     ) -> Result<(), WorkflowRuntimeError> {
+        let payload =
+            external::record_event_decision(&self.inner.pool, event_name, payload).await?;
         self.inner
             .client
             .emit_event(event_name, payload.clone(), Some(WORKFLOW_QUEUE))
@@ -1684,6 +1712,10 @@ fn default_hmac_encoding() -> String {
 
 #[derive(Debug, Deserialize)]
 struct PythonWorkflowDiscovery {
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    input_schema: Option<Value>,
     workflow_name: String,
     source_path: String,
     #[serde(default)]
@@ -1708,6 +1740,7 @@ struct PythonWorkflowDiscoveryPayload {
 
 #[derive(Debug, Default)]
 struct PythonWorkflowMetadata {
+    external_catalog: BTreeMap<String, external::WorkflowDescriptor>,
     webhooks: Vec<RegisteredWorkflowWebhook>,
     schedules: Vec<Value>,
     workflow_names: BTreeSet<String>,
@@ -1719,6 +1752,12 @@ fn metadata_from_discovery_payload(
 ) -> PythonWorkflowMetadata {
     let mut metadata = PythonWorkflowMetadata::default();
     for workflow in payload.workflows {
+        metadata.external_catalog.insert(workflow.workflow_name.clone(), external::WorkflowDescriptor {
+            workflow_name: workflow.workflow_name.clone(),
+            description: workflow.description,
+            input_schema: workflow.input_schema,
+            input_contract: "Native workflow input; workflow validation and approval gates apply. Discovery is not approval to send or publish.".to_owned(),
+        });
         metadata
             .workflow_names
             .insert(workflow.workflow_name.clone());
@@ -1926,7 +1965,9 @@ fn parse_worker_concurrency(raw: Option<&str>, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_workflow_metadata_reconciler(
+    external_catalog: Arc<RwLock<BTreeMap<String, external::WorkflowDescriptor>>>,
     schedule_client: Client,
     workflow_clients: WorkflowQueueClients,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
@@ -1953,6 +1994,8 @@ fn spawn_workflow_metadata_reconciler(
             .await
             {
                 Ok((metadata, schedules)) => {
+                    *external_catalog.write().unwrap_or_else(|p| p.into_inner()) =
+                        metadata.external_catalog.clone();
                     if let Err(error) = record_workflow_queue_metrics(
                         &mut queue_metrics,
                         [
@@ -2419,6 +2462,8 @@ async fn run_schedule_tick(
         .spawn(
             WORKFLOW_TASK,
             WorkflowTaskInput {
+                external_origin: None,
+                external_owner: None,
                 workflow_name: schedule.workflow_name.clone(),
                 input: schedule.input.clone(),
                 harness_type: HarnessType::Codex,
@@ -2985,6 +3030,7 @@ async fn run_python_workflow_host_local(
             "task_id": ctx.task_id(),
             "workflow_name": input.workflow_name,
             "input": input.input,
+            "external_origin": input.external_origin,
         }),
     )
     .await?;
@@ -3137,6 +3183,7 @@ where
             "task_id": ctx.task_id(),
             "workflow_name": input.workflow_name,
             "input": input.input,
+            "external_origin": input.external_origin,
         }),
     )
     .await?;
@@ -3438,6 +3485,19 @@ async fn handle_python_context_request(
                 required_python_string(message, "correlation_id", "ctx.event.wait")?;
             let timeout = parse_optional_python_duration_seconds(message, "timeout_seconds")?;
             let event_name = python_workflow_event_name(event_type, correlation_id);
+            if let (Some(descriptor), Some(owner)) =
+                (message.get("approval"), input.external_owner.as_ref())
+            {
+                external::register_approval(
+                    workflow_clients.standard.pool(),
+                    owner,
+                    ctx.task_id(),
+                    step,
+                    &event_name,
+                    descriptor,
+                )
+                .await?;
+            }
             match ctx
                 .await_event::<Value>(
                     &event_name,
@@ -3448,7 +3508,18 @@ async fn handle_python_context_request(
                 )
                 .await
             {
-                Ok(value) => Ok(value),
+                Ok(value) => {
+                    if message.get("approval").is_some() && input.external_owner.is_some() {
+                        Ok(external::record_event_decision(
+                            workflow_clients.standard.pool(),
+                            &event_name,
+                            value,
+                        )
+                        .await?)
+                    } else {
+                        Ok(value)
+                    }
+                }
                 Err(absurd::Error::Suspend) => return Err(WorkflowRuntimeError::Suspend),
                 Err(error) => Err(error.to_string()),
             }
@@ -3558,8 +3629,10 @@ async fn start_python_child_workflow(
         .spawn(
             WORKFLOW_TASK,
             WorkflowTaskInput {
+                external_origin: None,
+                external_owner: parent.external_owner.clone(),
                 workflow_name: workflow_name.to_owned(),
-                input: child_input,
+                input: child_input.clone(),
                 harness_type: parent.harness_type.clone(),
                 slack_button_feedback: None,
             },
@@ -3569,6 +3642,31 @@ async fn start_python_child_workflow(
             },
         )
         .await?;
+    if let Some(owner) = &parent.external_owner {
+        // A workflow-specific idempotency key may resolve to an existing child.
+        // Never grant result access if that child belongs to different input.
+        let (task_table, _) = absurd_queue_tables(target_client.queue_name())?;
+        let original: Value = sqlx::query_scalar(&format!(
+            "SELECT params FROM {task_table} WHERE task_id=$1::uuid"
+        ))
+        .bind(&spawn.task_id)
+        .fetch_one(target_client.pool())
+        .await?;
+        if original
+            .get("external_owner")
+            .and_then(|v| v.get("caller_id"))
+            != owner.get("caller_id")
+            || original.get("input") != Some(&child_input)
+            || original.get("workflow_name").and_then(Value::as_str) != Some(workflow_name)
+        {
+            return Err(WorkflowRuntimeError::BadRequest(
+                "child request key conflicts with existing workflow input".into(),
+            ));
+        }
+        sqlx::query("INSERT INTO external_workflow_children (caller_id,request_id,task_id,run_id) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+            .bind(owner["caller_id"].as_str()).bind(owner["request_id"].as_str()).bind(&spawn.task_id).bind(&spawn.run_id)
+            .execute(target_client.pool()).await?;
+    }
     Ok(json!({
         "workflow_name": workflow_name,
         "task_id": spawn.task_id,

@@ -86,6 +86,8 @@ class RegisteredWorkflow:
     schedule: Any
     principal: Any = None
     agent_defaults: dict[str, Any] | None = None
+    description: str = ""
+    input_schema: dict[str, Any] | None = None
 
 
 def workflow_dirs() -> list[Path]:
@@ -156,6 +158,8 @@ def load_workflow_file(path: Path) -> RegisteredWorkflow | None:
         schedule=getattr(module, "SCHEDULE", None),
         principal=getattr(module, "WORKFLOW_PRINCIPAL", None),
         agent_defaults=agent_defaults,
+        description=str(getattr(module, "WORKFLOW_DESCRIPTION", None) or module.__doc__ or "").strip(),
+        input_schema=getattr(module, "WORKFLOW_INPUT_SCHEMA", None),
     )
 
 
@@ -381,6 +385,7 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
         workflow_name=workflow_name,
         pool=pool,
         agent_defaults=registered.agent_defaults,
+        external_origin=message.get("external_origin"),
     )
     previous_metric_rpc = metrics.get_metric_rpc()
     metrics.set_metric_rpc(rpc)
@@ -416,6 +421,8 @@ def discovery_payload() -> dict[str, Any]:
                 "webhooks": normalize_webhooks(workflow),
                 "schedule": normalize_schedule(workflow),
                 "principal": normalize_principal(workflow),
+                "description": workflow.description,
+                "input_schema": workflow.input_schema,
             }
             for workflow in workflows.values()
         ],
