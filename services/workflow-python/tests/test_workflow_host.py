@@ -213,6 +213,17 @@ class WorkflowHostTests(unittest.TestCase):
             [{"type": "ctx.sleep", "step": "pause", "duration_seconds": 2.5}],
         )
 
+    def test_approval_preview_uses_durable_event_protocol(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(rpc, run_id="run", task_id="task", workflow_name="sample")
+        asyncio.run(ctx.request_approval("approve", "review", "content:123",
+            preview={"body": "Exact content"}, exact={"digest": "123"}, approvers=["human"]))
+        self.assertEqual(rpc.requests[0]["type"], "ctx.event.wait")
+        self.assertEqual(rpc.requests[0]["approval"], {
+            "preview": {"body": "Exact content"}, "exact": {"digest": "123"},
+            "approvers": ["human"], "decisions": ["approve", "reject", "revise"]})
+
     def test_wait_for_event_sends_durable_event_identity_and_timeout(self) -> None:
         host = load_workflow_host()
         rpc = RequestRpc()
@@ -600,6 +611,27 @@ class WorkflowHostTests(unittest.TestCase):
             payload["result"],
             {"model": "claude-opus-4-8", "reasoning": "high", "text": "do the thing"},
         )
+
+    def test_external_origin_is_outside_workflow_input(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        async def handler(inp, ctx):
+            return {"input": inp, "origin": ctx.external_origin}
+        registered = host.RegisteredWorkflow(
+            workflow_name="sample", source_path="sample.py", handler=handler,
+            input_cls=None, webhooks=None, schedule=None,
+            description="A synthetic workflow", input_schema={"type": "object"},
+        )
+        async def create_pool():
+            return None
+        with patch.object(host, "discover_workflows", return_value={"sample": registered}), patch.object(host, "create_pool", create_pool):
+            for trusted in (None, {"caller_id": "external:test", "thread_id": "actual", "request_id": "one"}):
+                result = asyncio.run(host.run_workflow({"workflow_name": "sample", "run_id": "run-1", "task_id": "task-1", "external_origin": trusted,
+                    "input": {"external_origin": {"caller_id": "forged"}}}, rpc))
+                self.assertEqual(result["result"]["origin"], trusted or {})
+            discovered = host.discovery_payload()["workflows"][0]
+            self.assertEqual(discovered["description"], "A synthetic workflow")
+            self.assertEqual(discovered["input_schema"], {"type": "object"})
 
     def test_load_workflow_file_reads_agent_defaults(self) -> None:
         host = load_workflow_host()

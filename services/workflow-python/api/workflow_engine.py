@@ -48,7 +48,9 @@ class WorkflowContext:
         workflow_name: str,
         pool: Any = None,
         agent_defaults: dict[str, Any] | None = None,
+        external_origin: dict[str, Any] | None = None,
     ) -> None:
+        self.external_origin = dict(external_origin or {})
         self._rpc = rpc
         self.run_id = run_id
         self.task_id = task_id
@@ -142,6 +144,20 @@ class WorkflowContext:
         if timeout is not None:
             request["timeout_seconds"] = duration_seconds(timeout)
         return await self._rpc.request(request)
+
+    async def request_approval(
+        self, name: str, event_type: str, correlation_id: str, *,
+        preview: dict[str, Any], exact: dict[str, Any], approvers: list[str],
+        decisions: list[str] | None = None,
+    ) -> Any:
+        """Save an exact preview before waiting; the control plane owns decisions."""
+        return await self._rpc.request({
+            "type": "ctx.event.wait", "step": name,
+            "event_type": event_type, "correlation_id": correlation_id,
+            "approval": {"preview": preview, "exact": exact,
+                         "approvers": approvers,
+                         "decisions": decisions or ["approve", "reject", "revise"]},
+        })
 
     async def agent_turn(self, text: str | None = None, **kwargs: Any) -> Any:
         # Per-workflow AGENT_DEFAULTS (model / provider / reasoning / harness,

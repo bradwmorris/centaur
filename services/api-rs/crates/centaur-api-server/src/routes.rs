@@ -296,6 +296,17 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route("/api/sandboxes/drain", post(drain_sandboxes))
         .route("/api/internal/context-curator/infer", post(curator_infer))
         .merge(slack_proxy_router())
+        .route("/api/external/workflows", get(external_catalog))
+        .route("/api/external/workflows/validate", post(external_validate))
+        .route("/api/external/workflows/requests", post(external_start))
+        .route(
+            "/api/external/workflows/requests/{request_id}/decisions",
+            post(external_decide),
+        )
+        .route(
+            "/api/external/workflows/requests/{request_id}",
+            get(external_status),
+        )
         .route("/api/workflows/schedules", get(list_workflow_schedules))
         .route(
             "/api/workflows/runs",
@@ -573,6 +584,13 @@ async fn authorize_api_request(
 fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
     let capability = |capability| Some(RouteAccess::Capability(capability));
     match (method, route) {
+        (&Method::GET, "/api/external/workflows")
+        | (&Method::POST, "/api/external/workflows/validate")
+        | (&Method::POST, "/api/external/workflows/requests")
+        | (&Method::GET, "/api/external/workflows/requests/{request_id}")
+        | (&Method::POST, "/api/external/workflows/requests/{request_id}/decisions") => {
+            capability(Capability::ExternalWorkflows)
+        }
         (&Method::GET, "/api/session/{thread_key}")
         | (&Method::GET, "/api/session/{thread_key}/events") => {
             capability(Capability::SessionsRead)
@@ -2902,10 +2920,66 @@ async fn invoke_workflow_button(
     Ok(Json(serde_json::to_value(run)?))
 }
 
+async fn external_catalog(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        json!({"workflows": workflow_runtime(&state)?.external_catalog()?}),
+    ))
+}
+
+async fn external_validate(
+    State(state): State<AppState>,
+    Json(request): Json<centaur_workflows::external::ExternalRequest>,
+) -> Result<Json<Value>, ApiError> {
+    workflow_runtime(&state)?.validate_external(&request)?;
+    Ok(Json(
+        json!({"valid": true, "validation": "admission_only", "executed": false}),
+    ))
+}
+
+async fn external_start(
+    State(state): State<AppState>,
+    Extension(caller): Extension<AuthenticatedCaller>,
+    Json(request): Json<centaur_workflows::external::ExternalRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        workflow_runtime(&state)?
+            .start_external(caller.identity(), request)
+            .await?,
+    ))
+}
+
+async fn external_decide(
+    State(state): State<AppState>,
+    Extension(caller): Extension<AuthenticatedCaller>,
+    Path(request_id): Path<String>,
+    Json(request): Json<centaur_workflows::external::ApprovalDecision>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        workflow_runtime(&state)?
+            .decide_external(caller.identity(), &request_id, request)
+            .await?,
+    ))
+}
+
+async fn external_status(
+    State(state): State<AppState>,
+    Extension(caller): Extension<AuthenticatedCaller>,
+    Path(request_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        workflow_runtime(&state)?
+            .external_status(caller.identity(), &request_id)
+            .await?,
+    ))
+}
+
 async fn create_workflow_run(
     State(state): State<AppState>,
     Json(request): Json<CreateWorkflowRunRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if request.input.get("_centaur_external").is_some() {
+        return Err(ApiError::BadRequest("reserved external provenance".into()));
+    }
     let workflows = workflow_runtime(&state)?;
     let run = workflows.create_run(request).await?;
     Ok(Json(serde_json::to_value(run)?))
