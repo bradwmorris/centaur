@@ -583,9 +583,9 @@ mod tests {
                 }).await?;
                 let saved = record_event_decision(&pool, &event, decision).await.unwrap();
                 assert_eq!(saved["run_id"], message["run_id"]);
-                    if ctx.attempt() == 1 {
-                        return Err(absurd::Error::InvalidOptions("synthetic post-approval failure".into()));
-                    }
+                if ctx.attempt() == 1 {
+                    return Err(absurd::Error::InvalidOptions("synthetic post-approval failure".into()));
+                }
                 Ok::<Value, absurd::Error>(saved)
             }
         }).unwrap();
