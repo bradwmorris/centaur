@@ -633,6 +633,32 @@ class WorkflowHostTests(unittest.TestCase):
             self.assertEqual(discovered["description"], "A synthetic workflow")
             self.assertEqual(discovered["input_schema"], {"type": "object"})
 
+    def test_approval_identity_survives_a_new_attempt(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+
+        async def handler(inp, ctx):
+            await ctx.request_approval("approve", "review", f"{ctx.run_id}:hash",
+                preview={"body": "Reviewed"}, exact={"run_id": ctx.run_id, "hash": "hash"},
+                approvers=["human"])
+            return {"run": ctx.run_id, "attempt": ctx.attempt_run_id}
+
+        registered = host.RegisteredWorkflow(
+            workflow_name="sample", source_path="sample.py", handler=handler,
+            input_cls=None, webhooks=None, schedule=None,
+        )
+
+        async def create_pool():
+            return None
+
+        with patch.object(host, "discover_workflows", return_value={"sample": registered}), patch.object(host, "create_pool", create_pool):
+            for attempt in ("initial", "resumed"):
+                result = asyncio.run(host.run_workflow({"workflow_name": "sample",
+                    "run_id": "initial", "attempt_run_id": attempt, "task_id": "task",
+                    "input": {"run_id": "forged", "attempt_run_id": "forged"}}, rpc))
+                self.assertEqual(result["result"], {"run": "initial", "attempt": attempt})
+        self.assertEqual(rpc.requests[0], rpc.requests[1])
+
     def test_load_workflow_file_reads_agent_defaults(self) -> None:
         host = load_workflow_host()
         with tempfile.TemporaryDirectory() as tmp:

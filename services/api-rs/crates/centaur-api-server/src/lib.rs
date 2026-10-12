@@ -108,6 +108,10 @@ mod tests {
         ));
         for (method, path) in [
             ("GET", "/api/workflows/runs"),
+            (
+                "POST",
+                "/api/workflows/runs/00000000-0000-0000-0000-000000000001/retry",
+            ),
             ("POST", "/api/workflows/runs"),
             (
                 "GET",

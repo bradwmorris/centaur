@@ -10,7 +10,8 @@ use std::{
 
 use absurd::{
     AwaitEventOptions, Client, ClientOptions, CreateQueueOptions, RetryKind, RetryStrategy,
-    SpawnOptions, StepHandle, TaskContext, TaskRegistrationOptions, Worker, WorkerOptions,
+    RetryTaskOptions, SpawnOptions, StepHandle, TaskContext, TaskRegistrationOptions, Worker,
+    WorkerOptions,
 };
 use centaur_iron_control::{IronControlClient, IronControlError, PrincipalInput, slugify};
 use centaur_sandbox_core::SandboxSpec;
@@ -1033,6 +1034,30 @@ impl WorkflowRuntime {
             if let Some(run) = self.get_run_for_queue(queue_name, run_id).await? {
                 client.cancel_task(&run.task_id, None).await?;
                 return Ok(());
+            }
+        }
+        Err(WorkflowRuntimeError::NotFound(run_id.to_owned()))
+    }
+
+    /// Operator recovery preserves the task, checkpoints, ownership and approvals.
+    /// The queue atomically rejects retries unless the task is still failed.
+    pub async fn retry_run(&self, run_id: &str) -> Result<WorkflowRun, WorkflowRuntimeError> {
+        for (queue_name, client) in [
+            (WORKFLOW_QUEUE, &self.inner.client),
+            (WORKFLOW_SLACK_LIVE_QUEUE, &self.inner.slack_live_client),
+            (WORKFLOW_ETL_QUEUE, &self.inner.etl_client),
+            (WORKFLOW_ETL_BACKFILL_QUEUE, &self.inner.etl_backfill_client),
+        ] {
+            if let Some(run) = self.get_run_for_queue(queue_name, run_id).await? {
+                if run.status != "failed" {
+                    return Err(WorkflowRuntimeError::BadRequest(
+                        "only failed workflows can be retried".into(),
+                    ));
+                }
+                let retry = client
+                    .retry_task(&run.task_id, RetryTaskOptions::default())
+                    .await?;
+                return self.get_run(&retry.run_id).await;
             }
         }
         Err(WorkflowRuntimeError::NotFound(run_id.to_owned()))
@@ -2978,6 +3003,44 @@ async fn start_workflow_task_heartbeat(
     Ok(WorkflowTaskHeartbeatGuard { task })
 }
 
+async fn first_workflow_run_id(
+    pool: &sqlx::PgPool,
+    queue: &str,
+    task_id: &str,
+) -> Result<String, WorkflowRuntimeError> {
+    let (_, runs) = absurd_queue_tables(queue)?;
+    Ok(sqlx::query_scalar(&format!(
+        "SELECT run_id::text FROM {runs} WHERE task_id=$1::uuid ORDER BY attempt LIMIT 1"
+    ))
+    .bind(task_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn python_workflow_start_message(
+    input: &WorkflowTaskInput,
+    ctx: &TaskContext,
+    pool: &sqlx::PgPool,
+) -> Result<Value, WorkflowRuntimeError> {
+    // External handlers already bind approval content and event correlations to
+    // ctx.run_id. A failed attempt changes on retry; the first durable run does
+    // not. Querying existing state also repairs workflows predating this fix.
+    let run_id = if input.external_owner.is_some() {
+        first_workflow_run_id(pool, ctx.queue_name(), ctx.task_id()).await?
+    } else {
+        ctx.run_id().to_owned()
+    };
+    Ok(json!({
+        "type": "workflow.start",
+        "run_id": run_id,
+        "attempt_run_id": ctx.run_id(),
+        "task_id": ctx.task_id(),
+        "workflow_name": input.workflow_name,
+        "input": input.input,
+        "external_origin": input.external_origin,
+    }))
+}
+
 async fn run_python_workflow_host_local(
     input: WorkflowTaskInput,
     ctx: TaskContext,
@@ -3027,14 +3090,7 @@ async fn run_python_workflow_host_local(
 
     write_host_message(
         &mut stdin,
-        &json!({
-            "type": "workflow.start",
-            "run_id": ctx.run_id(),
-            "task_id": ctx.task_id(),
-            "workflow_name": input.workflow_name,
-            "input": input.input,
-            "external_origin": input.external_origin,
-        }),
+        &python_workflow_start_message(&input, &ctx, workflow_clients.standard.pool()).await?,
     )
     .await?;
 
@@ -3180,14 +3236,7 @@ where
 {
     write_host_message(
         stdin,
-        &json!({
-            "type": "workflow.start",
-            "run_id": ctx.run_id(),
-            "task_id": ctx.task_id(),
-            "workflow_name": input.workflow_name,
-            "input": input.input,
-            "external_origin": input.external_origin,
-        }),
+        &python_workflow_start_message(&input, &ctx, workflow_clients.standard.pool()).await?,
     )
     .await?;
 

@@ -534,6 +534,129 @@ mod tests {
             .await
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn external_python_approval_survives_suspension_and_failed_attempt() {
+        let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
+            eprintln!("SKIP: disposable database not configured");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let client = Client::from_pool_with_options(
+            pool.clone(),
+            ClientOptions {
+                queue_name: WORKFLOW_ETL_BACKFILL_QUEUE.into(),
+                ..ClientOptions::default()
+            },
+        )
+        .unwrap();
+        client
+            .create_queue(None, CreateQueueOptions::default())
+            .await
+            .unwrap();
+        let caller = format!("external-test-{}", uuid::Uuid::new_v4());
+        reserve(&pool, &caller, &request(json!({}))).await.unwrap();
+        let owner = json!({"caller_id":caller,"request_id":"req-1","thread_id":"test"});
+        let input = WorkflowTaskInput {
+            external_origin: Some(owner.clone()),
+            external_owner: Some(owner.clone()),
+            workflow_name: "synthetic".into(),
+            input: json!({}),
+            harness_type: HarnessType::Codex,
+            slack_button_feedback: None,
+        };
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let seen_handler = seen.clone();
+        let handler_pool = pool.clone();
+        client.register_task("approval-resume", move |input: WorkflowTaskInput, ctx| {
+            let pool = handler_pool.clone();
+            let seen = seen_handler.clone();
+            async move {
+                let message = python_workflow_start_message(&input, &ctx, &pool).await.unwrap();
+                seen.lock().unwrap().push(message.clone());
+                let run = message["run_id"].as_str().unwrap();
+                let event = format!("approval:{run}");
+                let descriptor = json!({"preview":{"body":"Reviewed"},"exact":{"run_id":run,"content_hash":"one"},"approvers":["human"],"decisions":["approve","reject"]});
+                register_approval(&pool, input.external_owner.as_ref().unwrap(), ctx.task_id(), "approve", &event, &descriptor).await.unwrap();
+                let decision = ctx.await_event::<Value>(&event, AwaitEventOptions {
+                    step_name: Some("approve".into()), timeout: None,
+                }).await?;
+                let saved = record_event_decision(&pool, &event, decision).await.unwrap();
+                assert_eq!(saved["run_id"], message["run_id"]);
+                if ctx.attempt() == 1 {
+                    return Err(absurd::Error::InvalidOptions("synthetic post-approval failure".into()));
+                }
+                Ok::<Value, absurd::Error>(saved)
+            }
+        }).unwrap();
+        let first = client
+            .spawn(
+                "approval-resume",
+                input,
+                SpawnOptions {
+                    max_attempts: Some(1),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        let work = || absurd::WorkBatchOptions {
+            worker_id: "approval-test".into(),
+            ..Default::default()
+        };
+        client.work_batch(work()).await.unwrap();
+        assert!(matches!(
+            client
+                .fetch_task_result(&first.task_id, None)
+                .await
+                .unwrap(),
+            Some(absurd::TaskResultSnapshot::Sleeping)
+        ));
+        let event = format!("approval:{}", first.run_id);
+        let decision = json!({"actor":"human","decision":"approve","verified":true,"signed_at":"first","run_id":first.run_id,"content_hash":"one"});
+        record_event_decision(&pool, &event, decision.clone())
+            .await
+            .unwrap();
+        client
+            .emit_event(&event, decision.clone(), None)
+            .await
+            .unwrap();
+        client.work_batch(work()).await.unwrap();
+        assert!(matches!(
+            client
+                .fetch_task_result(&first.task_id, None)
+                .await
+                .unwrap(),
+            Some(absurd::TaskResultSnapshot::Failed { .. })
+        ));
+        let retried = client
+            .retry_task(&first.task_id, RetryTaskOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(retried.task_id, first.task_id);
+        client.work_batch(work()).await.unwrap();
+        let result = client
+            .await_task_result(&first.task_id, None, Some(Duration::from_secs(5)))
+            .await
+            .unwrap();
+        assert_eq!(result.result::<Value>().unwrap(), Some(decision));
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 3);
+            assert_eq!(seen[0]["run_id"], seen[2]["run_id"]);
+            assert_ne!(seen[0]["attempt_run_id"], seen[2]["attempt_run_id"]);
+        }
+        sqlx::query("DELETE FROM workflow_approvals WHERE caller_id=$1")
+            .bind(&caller)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM external_workflow_requests WHERE caller_id=$1")
+            .bind(&caller)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
     #[test]
     fn workflow_cannot_set_approval_actor_or_bypass_choices() {
         let mut descriptor =
