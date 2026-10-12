@@ -314,6 +314,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         )
         .route("/api/workflows/runs/{run_id}", get(get_workflow_run))
         .route(
+            "/api/workflows/runs/{run_id}/retry",
+            post(retry_workflow_run),
+        )
+        .route(
             "/api/workflows/runs/{run_id}/cancel",
             post(cancel_workflow_run),
         )
@@ -609,7 +613,8 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         | (&Method::GET, "/api/workflows/runs")
         | (&Method::GET, "/api/workflows/runs/{run_id}") => capability(Capability::WorkflowsRead),
         (&Method::POST, "/api/workflows/runs")
-        | (&Method::POST, "/api/workflows/runs/{run_id}/cancel") => {
+        | (&Method::POST, "/api/workflows/runs/{run_id}/cancel")
+        | (&Method::POST, "/api/workflows/runs/{run_id}/retry") => {
             capability(Capability::WorkflowsWrite)
         }
         (&Method::POST, "/api/workflows/events") => capability(Capability::WorkflowsEvents),
@@ -3010,6 +3015,14 @@ async fn get_workflow_run(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let workflows = workflow_runtime(&state)?;
     let run = workflows.get_run(&run_id).await?;
+    Ok(Json(json!({ "ok": true, "run": run })))
+}
+
+async fn retry_workflow_run(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let run = workflow_runtime(&state)?.retry_run(&run_id).await?;
     Ok(Json(json!({ "ok": true, "run": run })))
 }
 

@@ -195,6 +195,19 @@ or:
 
 ### Context RPC
 
+For externally admitted workflows (including their child tasks), `run_id` in
+`workflow.start` is the first durable run for the task. It remains stable across
+failed attempts so approval descriptors, event correlations and idempotency keys
+retain the identity used when the human reviewed them. `attempt_run_id` identifies
+the current execution for diagnostics. Both local and sandbox hosts receive the
+same envelope. Native workflows retain their existing run-ID behavior.
+
+Operators with `WorkflowsWrite` can retry a failed task through
+`POST /api/workflows/runs/{run_id}/retry`. Recovery preserves its input, ownership,
+checkpoints and approval audit; it does not create a replacement task or approve
+anything. The queue atomically rejects non-failed tasks, and external-workflow
+credentials cannot use this operator route.
+
 While a workflow is running, the host may send requests:
 
 ```json

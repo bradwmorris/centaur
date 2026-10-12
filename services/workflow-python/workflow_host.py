@@ -381,6 +381,7 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
     ctx = WorkflowContext(
         rpc,
         run_id=str(message.get("run_id") or ""),
+        attempt_run_id=message.get("attempt_run_id"),
         task_id=str(message.get("task_id") or ""),
         workflow_name=workflow_name,
         pool=pool,

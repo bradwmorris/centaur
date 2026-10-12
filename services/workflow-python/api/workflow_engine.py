@@ -46,6 +46,7 @@ class WorkflowContext:
         run_id: str,
         task_id: str,
         workflow_name: str,
+        attempt_run_id: str | None = None,
         pool: Any = None,
         agent_defaults: dict[str, Any] | None = None,
         external_origin: dict[str, Any] | None = None,
@@ -53,6 +54,7 @@ class WorkflowContext:
         self.external_origin = dict(external_origin or {})
         self._rpc = rpc
         self.run_id = run_id
+        self.attempt_run_id = attempt_run_id or run_id
         self.task_id = task_id
         self.workflow_name = workflow_name
         self._pool = pool
