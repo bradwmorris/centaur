@@ -517,10 +517,15 @@ fn validate_request(request: &CuratorInferenceRequest) -> Result<(), ApiError> {
             "output_schema must match a supported Context inference contract".to_owned(),
         ));
     }
-    if is_maintenance(&request.output_schema) && input_bytes > 28_000 {
-        return Err(ApiError::PayloadTooLarge(
-            "maintenance input exceeds 28000 bytes".into(),
-        ));
+    let maintenance_input_limit = if request.output_schema == memory_synthesis_schema() {
+        132_000 // 128 KB corrective evidence plus the bounded synthesis prompt.
+    } else {
+        28_000
+    };
+    if is_maintenance(&request.output_schema) && input_bytes > maintenance_input_limit {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "maintenance input exceeds {maintenance_input_limit} bytes"
+        )));
     }
     if !supported_effort(&request.reasoning_effort) {
         return Err(ApiError::BadRequest(
@@ -926,6 +931,25 @@ mod tests {
             assert_eq!(result.output, output);
             assert_eq!(result.reasoning_effort, effort);
             assert_eq!(result.model, CURATOR_MODEL);
+        }
+    }
+
+    #[test]
+    fn synthesis_evidence_limit_preserves_legacy_maintenance_bounds() {
+        for (schema, limit) in [
+            (memory_synthesis_schema(), 132_000),
+            (memory_maintenance_schema(), 28_000),
+            (legacy_memory_maintenance_schema(), 28_000),
+        ] {
+            let mut input = request();
+            input.output_schema = schema;
+            input.input = "x".repeat(limit - input.system_prompt.len());
+            assert!(validate_request(&input).is_ok());
+            input.input.push('x');
+            assert!(matches!(
+                validate_request(&input),
+                Err(ApiError::PayloadTooLarge(_))
+            ));
         }
     }
 
