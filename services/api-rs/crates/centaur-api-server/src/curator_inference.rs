@@ -325,6 +325,14 @@ fn memory_only_curator_schema() -> Value {
     serde_json::from_str(include_str!("curator_contracts/extraction-v1.json")).unwrap()
 }
 
+fn event_extraction_schema() -> Value {
+    serde_json::from_str(include_str!("curator_contracts/event-extraction-v1.json")).unwrap()
+}
+
+fn memory_synthesis_schema() -> Value {
+    serde_json::from_str(include_str!("curator_contracts/memory-synthesis-v1.json")).unwrap()
+}
+
 fn chat_summary_schema() -> Value {
     serde_json::from_str(include_str!("curator_contracts/chat-summary-v1.json")).unwrap()
 }
@@ -334,7 +342,9 @@ fn legacy_memory_maintenance_schema() -> Value {
 }
 
 fn is_maintenance(schema: &Value) -> bool {
-    schema == &memory_maintenance_schema() || schema == &legacy_memory_maintenance_schema()
+    schema == &memory_maintenance_schema()
+        || schema == &legacy_memory_maintenance_schema()
+        || schema == &memory_synthesis_schema()
 }
 
 impl CuratorInferenceRuntime {
@@ -501,6 +511,7 @@ fn validate_request(request: &CuratorInferenceRequest) -> Result<(), ApiError> {
     if request.output_schema != memory_only_curator_schema()
         && !is_maintenance(&request.output_schema)
         && request.output_schema != chat_summary_schema()
+        && request.output_schema != event_extraction_schema()
     {
         return Err(ApiError::BadRequest(
             "output_schema must match a supported Context inference contract".to_owned(),
@@ -740,14 +751,35 @@ fn matches_contract(value: &Value, schema: &Value, root: &Value) -> bool {
     {
         return false;
     }
+    if let Some(types) = schema.get("type").and_then(Value::as_array) {
+        return types.iter().any(|kind| {
+            let mut variant = schema.clone();
+            variant["type"] = kind.clone();
+            matches_contract(value, &variant, root)
+        });
+    }
     match schema.get("type").and_then(Value::as_str) {
-        Some("string") => value.is_string(),
+        Some("null") => value.is_null(),
+        Some("integer") => value.as_i64().is_some_and(|number| {
+            schema
+                .get("minimum")
+                .and_then(Value::as_i64)
+                .is_none_or(|min| number >= min)
+        }),
+        Some("string") => value.as_str().is_some_and(|text| {
+            schema.get("format").and_then(Value::as_str) != Some("uuid")
+                || uuid::Uuid::parse_str(text).is_ok()
+        }),
         Some("boolean") => value.is_boolean(),
         Some("array") => value.as_array().is_some_and(|items| {
             schema
                 .get("maxItems")
                 .and_then(Value::as_u64)
                 .is_none_or(|max| items.len() as u64 <= max)
+                && schema
+                    .get("minItems")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|min| items.len() as u64 >= min)
                 && schema
                     .get("items")
                     .is_some_and(|s| items.iter().all(|v| matches_contract(v, s, root)))
@@ -861,6 +893,8 @@ mod tests {
     #[tokio::test]
     async fn all_consumer_contracts_complete_and_preserve_effort() {
         for (schema, output, effort) in [
+            (event_extraction_schema(), json!({"events":[]}), "high"),
+            (memory_synthesis_schema(), json!({"memories":[]}), "high"),
             (
                 memory_only_curator_schema(),
                 json!({"create_objects":[],"create_connections":[]}),
@@ -893,6 +927,35 @@ mod tests {
             assert_eq!(result.reasoning_effort, effort);
             assert_eq!(result.model, CURATOR_MODEL);
         }
+    }
+
+    #[test]
+    fn event_contracts_require_bounded_grounding_and_revision_types() {
+        let schema = memory_synthesis_schema();
+        let mut plan = json!({"memories":[{"action":"create","object_id":null,
+            "expected_revision":null,"title":"Preferred meeting time",
+            "description":"Alex prefers morning meetings.",
+            "event_ids":["00000000-0000-4000-8000-000000000001"],
+            "reason":"Explicit preference"}]});
+        assert!(matches_contract(&plan, &schema, &schema));
+        plan["memories"][0]["event_ids"] = json!([]);
+        assert!(!matches_contract(&plan, &schema, &schema));
+        plan["memories"][0]["event_ids"] = json!(["not-an-id"]);
+        assert!(!matches_contract(&plan, &schema, &schema));
+        plan["memories"][0]["event_ids"] = json!(["00000000-0000-4000-8000-000000000001"]);
+        plan["memories"][0]["expected_revision"] = json!(0);
+        assert!(!matches_contract(&plan, &schema, &schema));
+        plan["memories"][0]["expected_revision"] = json!(1.5);
+        assert!(!matches_contract(&plan, &schema, &schema));
+        plan["memories"][0]["expected_revision"] = json!(1);
+        assert!(matches_contract(&plan, &schema, &schema));
+        let entry = plan["memories"][0].clone();
+        plan["memories"] = json!(vec![entry; 21]);
+        assert!(!matches_contract(&plan, &schema, &schema));
+        let mut request = request();
+        request.output_schema = event_extraction_schema();
+        request.output_schema["properties"]["events"]["maxItems"] = json!(100);
+        assert!(validate_request(&request).is_err());
     }
 
     fn maintenance_plan_with_size(bytes: usize) -> Value {
